@@ -109,6 +109,7 @@ export function reduceAgentRunEvidence(
   evidence: AgentRunEvidence,
 ): AgentRunState {
   if (evidence.runId !== state.runId) return state;
+  if (!Number.isSafeInteger(evidence.sequence) || evidence.sequence < 0) return state;
   const previousSequence = state.lastSequenceBySource[evidence.sourceId];
   if (previousSequence !== undefined && evidence.sequence <= previousSequence) return state;
 
@@ -121,13 +122,15 @@ export function reduceAgentRunEvidence(
 
   switch (evidence.kind) {
     case "launch-requested":
-      execution = { status: "launching" };
-      process = { status: "starting" };
+      if (execution.status === "idle") execution = { status: "launching" };
+      if (process.status === "not-started") process = { status: "starting" };
       break;
     case "host-started":
-      execution = { status: "active" };
-      session = { status: "open", hostRef: evidence.hostRef };
-      process = { status: "running" };
+      if (execution.status === "idle" || execution.status === "launching") {
+        execution = { status: "active" };
+      }
+      if (session.status !== "closed") session = { status: "open", hostRef: evidence.hostRef };
+      if (process.status !== "exited") process = { status: "running" };
       break;
     case "progress":
       execution = { status: "active" };
@@ -157,7 +160,9 @@ export function reduceAgentRunEvidence(
       };
       break;
     case "process-exited":
-      process = { status: "exited", code: evidence.code, signal: evidence.signal };
+      if (process.status !== "exited") {
+        process = { status: "exited", code: evidence.code, signal: evidence.signal };
+      }
       break;
     case "timeout-fired":
       control = { status: "timed-out", timeoutMs: evidence.timeoutMs };
@@ -196,10 +201,15 @@ export function reduceAgentRunEvidence(
 }
 
 export function projectAgentRunStatus(state: AgentRunState): AgentRunProjectedStatus {
-  const terminal = state.process.status === "exited" || state.transportFailure !== null;
+  // A transport failure before any process exists is a terminal spawn failure.
+  // Once startup begins, loss of observation cannot prove that the host ended;
+  // correlated process-exit evidence remains the terminal fact.
+  const terminal =
+    state.process.status === "exited" ||
+    (state.transportFailure !== null && state.process.status === "not-started");
 
   if (state.transportFailure) {
-    return { status: "failed", disposition: "transport-failed", terminal: true, taskOutcome: "unknown" };
+    return { status: "failed", disposition: "transport-failed", terminal, taskOutcome: "unknown" };
   }
   if (state.completionIntent?.reason === "agent-error") {
     return { status: "failed", disposition: "agent-error", terminal, taskOutcome: "unknown" };

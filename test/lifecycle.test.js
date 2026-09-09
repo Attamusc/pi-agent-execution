@@ -140,15 +140,62 @@ test("cross-source ordering uses source-local sequences rather than timestamps",
   assert.deepEqual(state.lastSequenceBySource, { host: 10, child: 2 });
 });
 
-test("wrong-run and stale source evidence are ignored without mutation", () => {
+test("wrong-run, stale, and malformed source sequences are ignored without mutation", () => {
   const initial = reduceAgentRunEvidence(
     createAgentRunState(runId),
     evidence("host-started", { hostRef: "pane-1" }, { sequence: 2 }),
   );
   const wrongRun = reduceAgentRunEvidence(initial, evidence("timeout-fired", { timeoutMs: 1 }, { runId: "run-2", sequence: 99 }));
   const stale = reduceAgentRunEvidence(initial, evidence("timeout-fired", { timeoutMs: 1 }, { sequence: 2 }));
+  const malformed = reduceAgentRunEvidence(initial, evidence("timeout-fired", { timeoutMs: 1 }, { sequence: Number.NaN }));
   assert.equal(wrongRun, initial);
   assert.equal(stale, initial);
+  assert.equal(malformed, initial);
+});
+
+test("late launch evidence cannot resurrect an exited process or closed session", () => {
+  const state = reduceAll([
+    evidence("host-started", { hostRef: "pane-1" }, { sourceId: "parent", sequence: 1 }),
+    evidence("session-shutdown", { reason: "quit" }, { sourceId: "child", sequence: 1 }),
+    evidence("process-exited", { code: 0, signal: null }, { sourceId: "wrapper", sequence: 1 }),
+    evidence("host-started", { hostRef: "pane-late" }, { sourceId: "parent", sequence: 2 }),
+    evidence("launch-requested", { intent: {} }, { sourceId: "launcher", sequence: 1 }),
+  ]);
+  assert.equal(state.process.status, "exited");
+  assert.equal(state.session.status, "closed");
+  assert.equal(state.execution.status, "active");
+  assert.equal(projectAgentRunStatus(state).terminal, true);
+});
+
+test("late host-started evidence does not override newer execution settlement", () => {
+  const state = reduceAll([
+    evidence("agent-settled", {}, { sourceId: "child", sequence: 1 }),
+    evidence("host-started", { hostRef: "pane-late" }, { sourceId: "parent", sequence: 1 }),
+  ]);
+  assert.equal(state.execution.status, "settled");
+  assert.equal(projectAgentRunStatus(state).status, "waiting");
+});
+
+test("transport failure is terminal only when no process has started", () => {
+  const beforeStart = reduceAll([evidence("transport-failed", { message: "spawn failed" })]);
+  assert.deepEqual(projectAgentRunStatus(beforeStart), {
+    status: "failed",
+    disposition: "transport-failed",
+    terminal: true,
+    taskOutcome: "unknown",
+  });
+
+  const whileRunning = reduceAll([
+    evidence("host-started", { hostRef: "pane-1" }, { sequence: 1 }),
+    evidence("transport-failed", { message: "observation lost" }, { sequence: 2 }),
+  ]);
+  assert.equal(whileRunning.process.status, "running");
+  assert.deepEqual(projectAgentRunStatus(whileRunning), {
+    status: "failed",
+    disposition: "transport-failed",
+    terminal: false,
+    taskOutcome: "unknown",
+  });
 });
 
 test("normal evidence cannot override a recorded timeout", () => {
