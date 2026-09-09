@@ -10,6 +10,8 @@ import {
 
 const runId = "run-1";
 
+const nativeExit = (code, signal) => ({ exit: { kind: "native", code, signal } });
+
 function evidence(kind, data = {}, overrides = {}) {
   return {
     kind,
@@ -43,13 +45,13 @@ const lifecycleCases = [
       evidence("completion-requested", { reason: "done" }, { sequence: 1 }),
       evidence("agent-settled", {}, { sequence: 2 }),
       evidence("session-shutdown", { reason: "quit" }, { sequence: 3 }),
-      evidence("process-exited", { code: 0, signal: null }, { sourceId: "wrapper" }),
+      evidence("process-exited", nativeExit(0, null), { sourceId: "wrapper" }),
     ],
     expected: { status: "completed", terminal: true, disposition: "completed" },
   },
   {
     name: "zero exit without completion intent is abnormal",
-    records: [evidence("process-exited", { code: 0, signal: null })],
+    records: [evidence("process-exited", nativeExit(0, null))],
     expected: { status: "abnormal", terminal: true, disposition: "abnormal-exit" },
   },
   {
@@ -57,7 +59,7 @@ const lifecycleCases = [
     records: [
       evidence("completion-requested", { reason: "done" }, { sequence: 1 }),
       evidence("agent-settled", {}, { sequence: 2 }),
-      evidence("process-exited", { code: 7, signal: null }, { sequence: 3 }),
+      evidence("process-exited", nativeExit(7, null), { sequence: 3 }),
     ],
     expected: { status: "abnormal", terminal: true, disposition: "abnormal-exit" },
   },
@@ -66,7 +68,7 @@ const lifecycleCases = [
     records: [
       evidence("completion-requested", { reason: "done" }, { sequence: 1 }),
       evidence("agent-settled", {}, { sequence: 2 }),
-      evidence("process-exited", { code: null, signal: "SIGKILL" }, { sequence: 3 }),
+      evidence("process-exited", nativeExit(null, "SIGKILL"), { sequence: 3 }),
     ],
     expected: { status: "abnormal", terminal: true, disposition: "abnormal-exit" },
   },
@@ -158,7 +160,7 @@ test("late launch evidence cannot resurrect an exited process or closed session"
   const state = reduceAll([
     evidence("host-started", { hostRef: "pane-1" }, { sourceId: "parent", sequence: 1 }),
     evidence("session-shutdown", { reason: "quit" }, { sourceId: "child", sequence: 1 }),
-    evidence("process-exited", { code: 0, signal: null }, { sourceId: "wrapper", sequence: 1 }),
+    evidence("process-exited", nativeExit(0, null), { sourceId: "wrapper", sequence: 1 }),
     evidence("host-started", { hostRef: "pane-late" }, { sourceId: "parent", sequence: 2 }),
     evidence("launch-requested", { intent: {} }, { sourceId: "launcher", sequence: 1 }),
   ]);
@@ -177,6 +179,31 @@ test("late host-started evidence does not override newer execution settlement", 
   assert.equal(projectAgentRunStatus(state).status, "waiting");
 });
 
+test("a proven host start failure is terminal without process exit evidence", () => {
+  const failed = reduceAll([
+    evidence("launch-requested", { intent: {} }, { sequence: 1 }),
+    evidence("host-start-failed", { message: "spawn denied" }, { sequence: 2 }),
+    evidence("host-started", { hostRef: "late-pane" }, { sequence: 3 }),
+  ]);
+
+  assert.equal(failed.process.status, "failed-to-start");
+  assert.equal(failed.session.status, "unknown");
+  assert.equal(projectAgentRunStatus(failed).terminal, true);
+  const completion = projectAgentRunCompletion(failed, { output: "" });
+  assert.equal(completion.execution, "transport-failure");
+  assert.equal(completion.errorMessage, "spawn denied");
+  assert.equal(Object.hasOwn(completion, "processExit"), false);
+});
+
+test("host start failure cannot overwrite evidence that a process ran", () => {
+  const state = reduceAll([
+    evidence("host-started", { hostRef: "pane-1" }, { sequence: 1 }),
+    evidence("host-start-failed", { message: "late claim" }, { sequence: 2 }),
+  ]);
+  assert.equal(state.process.status, "running");
+  assert.equal(state.startFailure, null);
+});
+
 test("transport failure is terminal only when no process has started", () => {
   const beforeStart = reduceAll([evidence("transport-failed", { message: "spawn failed" })]);
   assert.deepEqual(projectAgentRunStatus(beforeStart), {
@@ -185,6 +212,13 @@ test("transport failure is terminal only when no process has started", () => {
     terminal: true,
     taskOutcome: "unknown",
   });
+
+  const whileStarting = reduceAll([
+    evidence("launch-requested", { intent: {} }, { sequence: 1 }),
+    evidence("transport-failed", { message: "dispatch outcome unknown" }, { sequence: 2 }),
+  ]);
+  assert.equal(whileStarting.process.status, "starting");
+  assert.equal(projectAgentRunStatus(whileStarting).terminal, false);
 
   const whileRunning = reduceAll([
     evidence("host-started", { hostRef: "pane-1" }, { sequence: 1 }),
@@ -233,7 +267,7 @@ test("a timeout outranks later agent and transport errors without erasing them",
   const afterAgentError = reduceAll([
     evidence("timeout-fired", { timeoutMs: 1000 }, { sequence: 1 }),
     evidence("completion-requested", { reason: "agent-error" }, { sequence: 2 }),
-    evidence("process-exited", { code: null, signal: "SIGKILL" }, { sequence: 3 }),
+    evidence("process-exited", nativeExit(null, "SIGKILL"), { sequence: 3 }),
   ]);
   assert.equal(afterAgentError.completionIntent?.reason, "agent-error");
   assert.equal(projectAgentRunCompletion(afterAgentError, { output: "" }).execution, "timed-out");
@@ -241,7 +275,7 @@ test("a timeout outranks later agent and transport errors without erasing them",
   const afterTransportError = reduceAll([
     evidence("timeout-fired", { timeoutMs: 1000 }, { sequence: 1 }),
     evidence("transport-failed", { message: "stream closed during shutdown" }, { sequence: 2 }),
-    evidence("process-exited", { code: null, signal: "SIGKILL" }, { sequence: 3 }),
+    evidence("process-exited", nativeExit(null, "SIGKILL"), { sequence: 3 }),
   ]);
   assert.equal(afterTransportError.transportFailure?.message, "stream closed during shutdown");
   assert.equal(projectAgentRunStatus(afterTransportError).disposition, "timed-out");
@@ -253,7 +287,7 @@ test("normal evidence cannot override a recorded timeout", () => {
     evidence("timeout-fired", { timeoutMs: 1000 }, { sequence: 1 }),
     evidence("completion-requested", { reason: "done" }, { sequence: 2 }),
     evidence("agent-settled", {}, { sequence: 3 }),
-    evidence("process-exited", { code: 0, signal: null }, { sequence: 4 }),
+    evidence("process-exited", nativeExit(0, null), { sequence: 4 }),
   ]);
   const projected = projectAgentRunStatus(state);
   assert.equal(projected.disposition, "timed-out");
@@ -282,7 +316,7 @@ test("projects immutable normalized completion evidence only from terminal state
     evidence("host-started", { hostRef: "pane-1" }, { sequence: 1 }),
     evidence("completion-requested", { reason: "done" }, { sequence: 2 }),
     evidence("agent-settled", {}, { sequence: 3 }),
-    evidence("process-exited", { code: 0, signal: null }, { sequence: 4 }),
+    evidence("process-exited", nativeExit(0, null), { sequence: 4 }),
   ]);
   const completion = projectAgentRunCompletion(completed, {
     output: "finished",
@@ -296,7 +330,7 @@ test("projects immutable normalized completion evidence only from terminal state
     output: "finished",
     taskOutcome: "unknown",
     settled: true,
-    processExit: { code: 0, signal: null },
+    processExit: { kind: "native", code: 0, signal: null },
     sessionRef: "/sessions/pi-session.jsonl",
     usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14, costUsd: 0.01 },
   });
@@ -307,7 +341,7 @@ test("projects immutable normalized completion evidence only from terminal state
 test("host references are not inferred to be persistent Pi session references", () => {
   const state = reduceAll([
     evidence("host-started", { hostRef: "pane-1" }, { sequence: 1 }),
-    evidence("process-exited", { code: 1, signal: null }, { sequence: 2 }),
+    evidence("process-exited", nativeExit(1, null), { sequence: 2 }),
   ]);
 
   const inferred = projectAgentRunCompletion(state, { output: "" });
@@ -317,14 +351,16 @@ test("host references are not inferred to be persistent Pi session references", 
 
 test("bare abnormal exits become explanatory transport failures", () => {
   const cases = [
-    [{ code: 7, signal: null }, "Process exited with code 7 without a graceful completion handshake"],
-    [{ code: null, signal: "SIGKILL" }, "Process exited from signal SIGKILL without a graceful completion handshake"],
-    [{ code: 0, signal: null }, "Process exited with code 0 without a graceful completion handshake"],
+    [{ kind: "native", code: 7, signal: null }, "Native process exited with code 7 without a graceful completion handshake"],
+    [{ kind: "native", code: null, signal: "SIGKILL" }, "Native process exited from signal SIGKILL without a graceful completion handshake"],
+    [{ kind: "native", code: 0, signal: null }, "Native process exited with code 0 without a graceful completion handshake"],
+    [{ kind: "shell", shellStatus: 143 }, "Shell command exited with status 143 without a graceful completion handshake"],
+    [{ kind: "process-not-found" }, "Owned process is no longer present, but its exit status is unavailable"],
   ];
 
   for (const [processExit, errorMessage] of cases) {
     const completion = projectAgentRunCompletion(
-      reduceAll([evidence("process-exited", processExit)]),
+      reduceAll([evidence("process-exited", { exit: processExit })]),
       { output: "" },
     );
     assert.equal(completion.execution, "transport-failure");
@@ -333,15 +369,47 @@ test("bare abnormal exits become explanatory transport failures", () => {
   }
 });
 
+test("native and shell zero exits can be normal but unavailable status cannot", () => {
+  for (const exit of [
+    { kind: "native", code: 0, signal: null },
+    { kind: "shell", shellStatus: 0 },
+  ]) {
+    const state = reduceAll([
+      evidence("completion-requested", { reason: "done" }, { sequence: 1 }),
+      evidence("agent-settled", {}, { sequence: 2 }),
+      evidence("process-exited", { exit }, { sequence: 3 }),
+    ]);
+    assert.equal(projectAgentRunCompletion(state, { output: "" }).execution, "normal-exit");
+  }
+
+  const unavailable = reduceAll([
+    evidence("completion-requested", { reason: "done" }, { sequence: 1 }),
+    evidence("agent-settled", {}, { sequence: 2 }),
+    evidence("process-exited", { exit: { kind: "process-not-found" } }, { sequence: 3 }),
+  ]);
+  assert.equal(projectAgentRunCompletion(unavailable, { output: "" }).execution, "transport-failure");
+});
+
+test("shell status 143 remains raw and explicit termination controls unavailable exits", () => {
+  const shell = reduceAll([evidence("process-exited", { exit: { kind: "shell", shellStatus: 143 } })]);
+  assert.deepEqual(projectAgentRunCompletion(shell, { output: "" }).processExit, { kind: "shell", shellStatus: 143 });
+
+  const terminated = reduceAll([
+    evidence("terminate-requested", { mode: "herdr-pane-close" }, { sequence: 1 }),
+    evidence("process-exited", { exit: { kind: "process-not-found" } }, { sequence: 2 }),
+  ]);
+  assert.equal(projectAgentRunCompletion(terminated, { output: "" }).execution, "terminated");
+});
+
 test("completion projection preserves each terminal execution disposition", () => {
   const cases = [
     [
-      [evidence("completion-requested", { reason: "agent-error" }, { sequence: 1 }), evidence("process-exited", { code: 1, signal: null }, { sequence: 2 })],
+      [evidence("completion-requested", { reason: "agent-error" }, { sequence: 1 }), evidence("process-exited", nativeExit(1, null), { sequence: 2 })],
       { execution: "agent-error", errorMessage: "provider failed" },
     ],
-    [[evidence("interrupt-requested", { mode: "process-abort" }, { sequence: 1 }), evidence("process-exited", { code: null, signal: "SIGTERM" }, { sequence: 2 })], { execution: "aborted" }],
-    [[evidence("timeout-fired", { timeoutMs: 10 }, { sequence: 1 }), evidence("process-exited", { code: null, signal: "SIGKILL" }, { sequence: 2 })], { execution: "timed-out" }],
-    [[evidence("terminate-requested", { mode: "process-signal" }, { sequence: 1 }), evidence("process-exited", { code: null, signal: "SIGTERM" }, { sequence: 2 })], { execution: "terminated" }],
+    [[evidence("interrupt-requested", { mode: "process-abort" }, { sequence: 1 }), evidence("process-exited", nativeExit(null, "SIGTERM"), { sequence: 2 })], { execution: "aborted" }],
+    [[evidence("timeout-fired", { timeoutMs: 10 }, { sequence: 1 }), evidence("process-exited", nativeExit(null, "SIGKILL"), { sequence: 2 })], { execution: "timed-out" }],
+    [[evidence("terminate-requested", { mode: "process-signal" }, { sequence: 1 }), evidence("process-exited", nativeExit(null, "SIGTERM"), { sequence: 2 })], { execution: "terminated" }],
     [[evidence("transport-failed", { message: "stream broke" })], { execution: "transport-failure", errorMessage: "stream broke" }],
   ];
 
@@ -357,7 +425,7 @@ test("completion projection preserves each terminal execution disposition", () =
 });
 
 test("state and nested axes are immutable", () => {
-  const state = reduceAll([evidence("process-exited", { code: 0, signal: null })]);
+  const state = reduceAll([evidence("process-exited", nativeExit(0, null))]);
   assert.equal(Object.isFrozen(state), true);
   assert.equal(Object.isFrozen(state.process), true);
   assert.equal(Object.isFrozen(state.lastSequenceBySource), true);

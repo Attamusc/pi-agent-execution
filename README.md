@@ -35,7 +35,7 @@ resolveAgentLaunchIntent(
 ): AgentLaunchIntent
 ```
 
-Parsing returns a discriminated result with source-located diagnostics. Discovery and eligibility remain caller policy. Optional values remain absent, except an explicitly declared `system-prompt` mode is represented even when its prompt body is empty, allowing a later caller override to preserve that mode. Unrecognized YAML metadata is preserved. The resolved intent is detached from inputs and deeply immutable, including cyclic metadata.
+Parsing returns a discriminated result with source-located diagnostics. Discovery and eligibility remain caller policy. A prompt descriptor is `{ text: string; mode?: "append" | "replace" }`: Markdown body without a `system-prompt` directive preserves mode absence, while an explicit `append` or `replace` is retained even when the body is empty. Consumers decide how to route implicit body text. A nonblank prompt text override inherits a declared definition mode when its own mode is absent. Unrecognized YAML metadata is preserved. The resolved intent is detached from inputs and deeply immutable, including cyclic metadata.
 
 Supported thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Invalid explicit values are rejected before host creation.
 
@@ -75,12 +75,22 @@ The state keeps facts on separate axes:
 | Execution | `idle`, `launching`, `active`, `settling`, `settled`; Pi settlement does not imply process exit. |
 | Completion intent | none, `done`, `auto-exit`, `ping`, or `agent-error`; intent does not imply settlement or exit. |
 | Session | `unknown`, `open`, or `closed`, with optional host reference and shutdown reason. |
-| Process | `not-started`, `starting`, `running`, or `exited`, with optional exit code and signal. Correlated exit is authoritative once startup begins. |
+| Process | `not-started`, `starting`, `running`, `failed-to-start`, or `exited`. `failed-to-start` requires explicit host proof that no child started. An exit retains one tagged observation unchanged. |
 | Control | none, turn/process interruption, termination request, or timeout. Timeout, process abort, and hard termination remain distinct; the first observed process-ending control cause is retained. Turn-only Escape may be superseded by a later process-ending cause or cleared by actual progress. |
-| Transport | optional failure evidence. A pre-start transport failure is terminal; transport loss while running is not terminal until process exit. |
+| Transport | optional failure evidence. Generic telemetry loss while starting or running is nonterminal because a child may exist. `host-start-failed` is the separate terminal proof that no child started and cannot be overwritten by delayed host-start evidence. |
 | Task outcome | always `unknown` in contract version 1. No prose classification or structured outcome protocol is required. |
 
-Late launch/host evidence cannot reopen a closed session or resurrect an exited process. The first process-ending control cause cannot be overwritten by a later timeout, abort, or termination request and remains the normalized disposition if shutdown subsequently records agent or transport errors; those diagnostic facts remain available on state.
+Late launch/host evidence cannot reopen a closed session or resurrect an exited or failed-to-start process. `host-start-failed` must not represent ambiguous command dispatch. The first process-ending control cause cannot be overwritten by a later timeout, abort, or termination request and remains the normalized disposition if shutdown subsequently records agent or transport errors; those diagnostic facts remain available on state.
+
+`process-exited` carries `{ exit: AgentProcessExit }`, where `AgentProcessExit` (also exported as `ProcessExit`) is exactly one of:
+
+```ts
+{ kind: "native"; code: number | null; signal: string | null }
+{ kind: "shell"; shellStatus: number }
+{ kind: "process-not-found" }
+```
+
+`native` is an actual child-process close observation. `shell` preserves the raw command status; status 143 does not imply or manufacture `SIGTERM`. `process-not-found` is a trustworthy OS observation that a previously owned child PID no longer exists while status remains unavailable—not pane disappearance or missing telemetry. The core performs no PID checks, syscalls, or watching.
 
 ### Normalized completion
 
@@ -98,7 +108,7 @@ projectAgentRunCompletion(
 
 The helper returns `undefined` when status projection is nonterminal. A caller must retain the run rather than manufacture a normal result. A terminal record contains `runId`, one execution value (`normal-exit`, `agent-error`, `aborted`, `timed-out`, `terminated`, or `transport-failure`), output, `taskOutcome: "unknown"`, settlement evidence, optional process exit/session/error data, and optional host-provided usage (`inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `totalTokens`, `costUsd`). It is deeply immutable. `sessionRef` is included only when the caller supplies verified Pi session evidence; an opaque lifecycle `hostRef` such as a pane or process identifier is never treated as session identity.
 
-`normal-exit` certifies only the execution handshake: completion intent, Pi settlement, and zero process exit without a signal. It does **not** certify that the assigned business task succeeded. Abnormal or uncorrelated exits project as transport failure evidence rather than task failure or success. If neither the caller nor transport supplied an error, the completion explains the observed exit code or signal and the missing graceful handshake.
+`normal-exit` certifies only the execution handshake: completion intent, Pi settlement, and either native code 0 with no signal or shell status 0. `process-not-found` never proves normal execution by itself; after an explicit termination request it can complete as `terminated`. This does **not** certify that the assigned business task succeeded. Abnormal or uncorrelated exits project as transport failure evidence rather than task failure or success. If neither the caller nor transport supplied an error, the completion explains the exact observed exit shape and missing graceful handshake.
 
 ## Assistant output seam
 

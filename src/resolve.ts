@@ -1,4 +1,4 @@
-import type { NormalizedAgentDefinition, ThinkingLevel } from "./definitions.js";
+import type { NormalizedAgentDefinition, SystemPrompt, ThinkingLevel } from "./definitions.js";
 import { deepFreeze, isThinkingLevel } from "./internal.js";
 
 export type AgentLaunchOverrides = Readonly<{
@@ -6,7 +6,7 @@ export type AgentLaunchOverrides = Readonly<{
   thinking?: string;
   tools?: readonly string[];
   skills?: readonly string[];
-  systemPrompt?: Readonly<{ mode: "append" | "replace"; text: string }>;
+  systemPrompt?: SystemPrompt;
   cwd?: string;
 }>;
 
@@ -19,7 +19,7 @@ export type AgentLaunchIntent = Readonly<{
     thinking?: ThinkingLevel;
     tools?: readonly string[];
     skills?: readonly string[];
-    systemPrompt?: Readonly<{ mode: "append" | "replace"; text: string }>;
+    systemPrompt?: SystemPrompt;
   }>;
 }>;
 
@@ -43,8 +43,12 @@ export function resolveAgentLaunchIntent(
   const thinking = (explicitThinking as ThinkingLevel | undefined) ?? definition.thinking;
   const tools = overrides.tools ?? definition.tools;
   const skills = overrides.skills ?? definition.skills;
+  const inheritedPromptMode = overrides.systemPrompt?.mode ?? definition.systemPrompt?.mode;
   const overridePrompt = overrides.systemPrompt && nonblank(overrides.systemPrompt.text)
-    ? { mode: overrides.systemPrompt.mode, text: overrides.systemPrompt.text.trim() }
+    ? {
+        ...(inheritedPromptMode === undefined ? {} : { mode: inheritedPromptMode }),
+        text: overrides.systemPrompt.text.trim(),
+      }
     : undefined;
   const systemPrompt = overridePrompt ?? definition.systemPrompt;
   const cwd = nonblank(overrides.cwd) ?? definition.cwd ?? callerCwd;

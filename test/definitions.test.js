@@ -84,6 +84,16 @@ test("rejects invalid explicit thinking with its source location", () => {
   }]);
 });
 
+test("preserves prompt mode absence for an implicit body", () => {
+  const result = parseAgentDefinition(
+    { path: "/agents/implicit.md", content: "---\nname: implicit\n---\nBody\n" },
+    { requiredFields: ["name"] },
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.definition.systemPrompt, { text: "Body" });
+});
+
 test("preserves an explicit system prompt mode when the body is empty", () => {
   const result = parseAgentDefinition(
     { path: "/agents/probe.md", content: "---\nname: probe\nsystem-prompt: replace\n---\n" },

@@ -16,6 +16,8 @@ export type AgentDefinitionPolicy = Readonly<{
   requiredFields: readonly ("name" | "description")[];
 }>;
 
+export type SystemPrompt = Readonly<{ mode?: "append" | "replace"; text: string }>;
+
 export type NormalizedAgentDefinition = Readonly<{
   name: string;
   description?: string;
@@ -23,7 +25,7 @@ export type NormalizedAgentDefinition = Readonly<{
   thinking?: ThinkingLevel;
   tools?: readonly string[];
   skills?: readonly string[];
-  systemPrompt?: Readonly<{ mode: "append" | "replace"; text: string }>;
+  systemPrompt?: SystemPrompt;
   cwd?: string;
   metadata: Readonly<Record<string, unknown>>;
 }>;
@@ -119,7 +121,7 @@ export function parseAgentDefinition(
     else diagnostics.push({ path: source.path, field: "thinking", location: fieldLocation(frontmatter, "thinking"), message: `Invalid thinking level '${thinkingValue}'` });
   }
 
-  let promptMode: "append" | "replace" = "append";
+  let promptMode: "append" | "replace" | undefined;
   if (promptModeValue !== undefined) {
     if (promptModeValue === "append" || promptModeValue === "replace") promptMode = promptModeValue;
     else diagnostics.push({ path: source.path, field: "system-prompt", location: fieldLocation(frontmatter, "system-prompt"), message: `Invalid system prompt mode '${promptModeValue}'` });
@@ -140,7 +142,9 @@ export function parseAgentDefinition(
     ...(thinking === undefined ? {} : { thinking }),
     ...(tools === undefined ? {} : { tools }),
     ...(skills === undefined ? {} : { skills }),
-    ...(body.length === 0 && promptModeValue === undefined ? {} : { systemPrompt: { mode: promptMode, text: body } }),
+    ...(body.length === 0 && promptMode === undefined
+      ? {}
+      : { systemPrompt: { ...(promptMode === undefined ? {} : { mode: promptMode }), text: body } }),
     ...(cwd === undefined ? {} : { cwd }),
     metadata,
   };

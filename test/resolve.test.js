@@ -59,6 +59,21 @@ test("omitted and blank string overrides preserve definition defaults and cwd te
   assert.equal(intent.cwd, "definition-relative");
 });
 
+test("a prompt text override inherits the declared mode when omitted", () => {
+  const intent = resolveAgentLaunchIntent(definition, "Task", "/caller", {
+    systemPrompt: { text: "Replacement text" },
+  });
+  assert.deepEqual(intent.effective.systemPrompt, { mode: "append", text: "Replacement text" });
+
+  const implicit = resolveAgentLaunchIntent(
+    { name: "implicit", systemPrompt: { text: "Body" }, metadata: {} },
+    "Task",
+    "/caller",
+    { systemPrompt: { text: "Override" } },
+  );
+  assert.deepEqual(implicit.effective.systemPrompt, { text: "Override" });
+});
+
 test("caller cwd is used verbatim when no definition or override cwd exists", () => {
   const minimal = { name: "worker", metadata: {} };
   assert.equal(resolveAgentLaunchIntent(minimal, "Task", "relative/caller", {}).cwd, "relative/caller");

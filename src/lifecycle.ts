@@ -5,6 +5,13 @@ export type CompletionReason = "done" | "auto-exit" | "ping" | "agent-error";
 export type InterruptMode = "process-abort" | "turn-escape";
 export type TerminationMode = "process-signal" | "herdr-pane-close";
 
+export type AgentProcessExit =
+  | Readonly<{ kind: "native"; code: number | null; signal: string | null }>
+  | Readonly<{ kind: "shell"; shellStatus: number }>
+  | Readonly<{ kind: "process-not-found" }>;
+
+export type ProcessExit = AgentProcessExit;
+
 type Evidence<Kind extends string, Data extends object> = Readonly<{
   kind: Kind;
   runId: string;
@@ -16,13 +23,14 @@ type Evidence<Kind extends string, Data extends object> = Readonly<{
 export type AgentRunEvidence =
   | Evidence<"launch-requested", { intent: AgentLaunchIntent }>
   | Evidence<"host-started", { hostRef: string }>
+  | Evidence<"host-start-failed", { message: string }>
   | Evidence<"progress", { activity?: string; estimated: boolean }>
   | Evidence<"turn-ended", { turnIndex?: number; stopReason?: string }>
   | Evidence<"agent-ended", { willRetry?: boolean }>
   | Evidence<"agent-settled", Record<string, never>>
   | Evidence<"completion-requested", { reason: CompletionReason }>
   | Evidence<"session-shutdown", { reason: string }>
-  | Evidence<"process-exited", { code: number | null; signal: string | null }>
+  | Evidence<"process-exited", { exit: AgentProcessExit }>
   | Evidence<"timeout-fired", { timeoutMs: number }>
   | Evidence<"interrupt-requested", { mode: InterruptMode }>
   | Evidence<"terminate-requested", { mode: TerminationMode }>
@@ -40,10 +48,10 @@ export type AgentRunState = Readonly<{
     shutdownReason?: string;
   }>;
   process: Readonly<{
-    status: "not-started" | "starting" | "running" | "exited";
-    code?: number | null;
-    signal?: string | null;
+    status: "not-started" | "starting" | "running" | "failed-to-start" | "exited";
+    exit?: AgentProcessExit;
   }>;
+  startFailure: Readonly<{ message: string }> | null;
   control:
     | Readonly<{ status: "none" }>
     | Readonly<{ status: "interrupted"; mode: InterruptMode }>
@@ -79,7 +87,7 @@ export type AgentRunCompletion = Readonly<{
   output: string;
   taskOutcome: "unknown";
   settled: boolean;
-  processExit?: Readonly<{ code: number | null; signal: string | null }>;
+  processExit?: AgentProcessExit;
   sessionRef?: string;
   errorMessage?: string;
   usage?: AgentRunUsage;
@@ -119,6 +127,7 @@ export function createAgentRunState(runId: string): AgentRunState {
     completionIntent: null,
     session: { status: "unknown" },
     process: { status: "not-started" },
+    startFailure: null,
     control: { status: "none" },
     transportFailure: null,
     lastSequenceBySource: {},
@@ -138,6 +147,7 @@ export function reduceAgentRunEvidence(
   let completionIntent = state.completionIntent;
   let session = state.session;
   let process = state.process;
+  let startFailure = state.startFailure;
   let control = state.control;
   let transportFailure = state.transportFailure;
 
@@ -147,11 +157,17 @@ export function reduceAgentRunEvidence(
       if (process.status === "not-started") process = { status: "starting" };
       break;
     case "host-started":
-      if (execution.status === "idle" || execution.status === "launching") {
-        execution = { status: "active" };
+      if (process.status !== "failed-to-start") {
+        if (execution.status === "idle" || execution.status === "launching") execution = { status: "active" };
+        if (session.status !== "closed") session = { status: "open", hostRef: evidence.hostRef };
+        if (process.status !== "exited") process = { status: "running" };
       }
-      if (session.status !== "closed") session = { status: "open", hostRef: evidence.hostRef };
-      if (process.status !== "exited") process = { status: "running" };
+      break;
+    case "host-start-failed":
+      if (process.status === "not-started" || process.status === "starting") {
+        process = { status: "failed-to-start" };
+        startFailure = { message: evidence.message };
+      }
       break;
     case "progress":
       execution = { status: "active" };
@@ -181,8 +197,8 @@ export function reduceAgentRunEvidence(
       };
       break;
     case "process-exited":
-      if (process.status !== "exited") {
-        process = { status: "exited", code: evidence.code, signal: evidence.signal };
+      if (process.status !== "exited" && process.status !== "failed-to-start") {
+        process = { status: "exited", exit: evidence.exit };
       }
       break;
     case "timeout-fired":
@@ -211,6 +227,7 @@ export function reduceAgentRunEvidence(
     completionIntent,
     session,
     process,
+    startFailure,
     control,
     transportFailure,
     lastSequenceBySource: {
@@ -226,6 +243,7 @@ export function projectAgentRunStatus(state: AgentRunState): AgentRunProjectedSt
   // correlated process-exit evidence remains the terminal fact.
   const terminal =
     state.process.status === "exited" ||
+    state.process.status === "failed-to-start" ||
     (state.transportFailure !== null && state.process.status === "not-started");
 
   // The first process-ending control request remains the execution cause even
@@ -239,6 +257,9 @@ export function projectAgentRunStatus(state: AgentRunState): AgentRunProjectedSt
   if (state.control.status === "interrupted" && state.control.mode === "process-abort") {
     return { status: "aborted", disposition: "aborted", terminal, taskOutcome: "unknown" };
   }
+  if (state.startFailure) {
+    return { status: "failed", disposition: "transport-failed", terminal: true, taskOutcome: "unknown" };
+  }
   if (state.transportFailure) {
     return { status: "failed", disposition: "transport-failed", terminal, taskOutcome: "unknown" };
   }
@@ -246,7 +267,9 @@ export function projectAgentRunStatus(state: AgentRunState): AgentRunProjectedSt
     return { status: "failed", disposition: "agent-error", terminal, taskOutcome: "unknown" };
   }
   if (state.process.status === "exited") {
-    const normalExit = state.process.code === 0 && state.process.signal === null;
+    const normalExit = state.process.exit?.kind === "native"
+      ? state.process.exit.code === 0 && state.process.exit.signal === null
+      : state.process.exit?.kind === "shell" && state.process.exit.shellStatus === 0;
     const gracefulHandshake = state.completionIntent !== null && state.execution.status === "settled";
     if (!normalExit || !gracefulHandshake) {
       return { status: "abnormal", disposition: "abnormal-exit", terminal: true, taskOutcome: "unknown" };
@@ -269,6 +292,19 @@ export function projectAgentRunStatus(state: AgentRunState): AgentRunProjectedSt
     return { status: "running", disposition: "pending", terminal: false, taskOutcome: "unknown" };
   }
   return { status: "idle", disposition: "pending", terminal: false, taskOutcome: "unknown" };
+}
+
+function describeAbnormalExit(exit: AgentProcessExit | undefined): string {
+  if (!exit) return "Process exit was observed without exit details";
+  if (exit.kind === "shell") {
+    return `Shell command exited with status ${exit.shellStatus} without a graceful completion handshake`;
+  }
+  if (exit.kind === "process-not-found") {
+    return "Owned process is no longer present, but its exit status is unavailable";
+  }
+  return exit.signal
+    ? `Native process exited from signal ${exit.signal} without a graceful completion handshake`
+    : `Native process exited with code ${exit.code ?? "unknown"} without a graceful completion handshake`;
 }
 
 /**
@@ -295,11 +331,9 @@ export function projectAgentRunCompletion(
             ? "terminated"
             : "transport-failure";
   const abnormalExitMessage = projected.disposition === "abnormal-exit" && state.process.status === "exited"
-    ? state.process.signal
-      ? `Process exited from signal ${state.process.signal} without a graceful completion handshake`
-      : `Process exited with code ${state.process.code ?? "unknown"} without a graceful completion handshake`
+    ? describeAbnormalExit(state.process.exit)
     : undefined;
-  const errorMessage = input.errorMessage ?? state.transportFailure?.message ?? abnormalExitMessage;
+  const errorMessage = input.errorMessage ?? state.startFailure?.message ?? state.transportFailure?.message ?? abnormalExitMessage;
 
   return deepFreeze({
     runId: state.runId,
@@ -307,8 +341,8 @@ export function projectAgentRunCompletion(
     output: input.output,
     taskOutcome: "unknown",
     settled: state.execution.status === "settled",
-    ...(state.process.status === "exited"
-      ? { processExit: { code: state.process.code ?? null, signal: state.process.signal ?? null } }
+    ...(state.process.status === "exited" && state.process.exit !== undefined
+      ? { processExit: structuredClone(state.process.exit) }
       : {}),
     ...(input.sessionRef === undefined ? {} : { sessionRef: input.sessionRef }),
     ...(errorMessage === undefined ? {} : { errorMessage }),

@@ -14,6 +14,7 @@ export {
   type Diagnostic,
   type NormalizedAgentDefinition,
   type ParseAgentDefinitionResult,
+  type SystemPrompt,
   type ThinkingLevel,
 } from "./definitions.js";
 
@@ -28,6 +29,7 @@ export {
   projectAgentRunCompletion,
   projectAgentRunStatus,
   reduceAgentRunEvidence,
+  type AgentProcessExit,
   type AgentRunCompletion,
   type AgentRunCompletionInput,
   type AgentRunDisposition,
@@ -37,6 +39,7 @@ export {
   type AgentRunUsage,
   type CompletionReason,
   type InterruptMode,
+  type ProcessExit,
   type TerminationMode,
 } from "./lifecycle.js";
 
