@@ -76,11 +76,11 @@ The state keeps facts on separate axes:
 | Completion intent | none, `done`, `auto-exit`, `ping`, or `agent-error`; intent does not imply settlement or exit. |
 | Session | `unknown`, `open`, or `closed`, with optional host reference and shutdown reason. |
 | Process | `not-started`, `starting`, `running`, or `exited`, with optional exit code and signal. Correlated exit is authoritative once startup begins. |
-| Control | none, turn/process interruption, termination request, or timeout. Timeout, abort, and termination remain distinct. |
+| Control | none, turn/process interruption, termination request, or timeout. Timeout, process abort, and hard termination remain distinct; the first observed process-ending control cause is retained. Turn-only Escape may be superseded by a later process-ending cause or cleared by actual progress. |
 | Transport | optional failure evidence. A pre-start transport failure is terminal; transport loss while running is not terminal until process exit. |
 | Task outcome | always `unknown` in contract version 1. No prose classification or structured outcome protocol is required. |
 
-Late launch/host evidence cannot reopen a closed session or resurrect an exited process, and ordinary later evidence cannot erase timeout, termination, or agent-error facts.
+Late launch/host evidence cannot reopen a closed session or resurrect an exited process. The first process-ending control cause cannot be overwritten by a later timeout, abort, or termination request and remains the normalized disposition if shutdown subsequently records agent or transport errors; those diagnostic facts remain available on state.
 
 ### Normalized completion
 
@@ -96,9 +96,9 @@ projectAgentRunCompletion(
 ): AgentRunCompletion | undefined
 ```
 
-The helper returns `undefined` when status projection is nonterminal. A caller must retain the run rather than manufacture a normal result. A terminal record contains `runId`, one execution value (`normal-exit`, `agent-error`, `aborted`, `timed-out`, `terminated`, or `transport-failure`), output, `taskOutcome: "unknown"`, settlement evidence, optional process exit/session/error data, and optional host-provided usage (`inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `totalTokens`, `costUsd`). It is deeply immutable.
+The helper returns `undefined` when status projection is nonterminal. A caller must retain the run rather than manufacture a normal result. A terminal record contains `runId`, one execution value (`normal-exit`, `agent-error`, `aborted`, `timed-out`, `terminated`, or `transport-failure`), output, `taskOutcome: "unknown"`, settlement evidence, optional process exit/session/error data, and optional host-provided usage (`inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `totalTokens`, `costUsd`). It is deeply immutable. `sessionRef` is included only when the caller supplies verified Pi session evidence; an opaque lifecycle `hostRef` such as a pane or process identifier is never treated as session identity.
 
-`normal-exit` certifies only the execution handshake: completion intent, Pi settlement, and zero process exit without a signal. It does **not** certify that the assigned business task succeeded. Abnormal or uncorrelated exits project as transport failure evidence rather than task failure or success.
+`normal-exit` certifies only the execution handshake: completion intent, Pi settlement, and zero process exit without a signal. It does **not** certify that the assigned business task succeeded. Abnormal or uncorrelated exits project as transport failure evidence rather than task failure or success. If neither the caller nor transport supplied an error, the completion explains the observed exit code or signal and the missing graceful handshake.
 
 ## Assistant output seam
 

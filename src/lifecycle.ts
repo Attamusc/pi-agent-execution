@@ -186,18 +186,17 @@ export function reduceAgentRunEvidence(
       }
       break;
     case "timeout-fired":
-      control = { status: "timed-out", timeoutMs: evidence.timeoutMs };
+      if (control.status === "none" || (control.status === "interrupted" && control.mode === "turn-escape")) {
+        control = { status: "timed-out", timeoutMs: evidence.timeoutMs };
+      }
       break;
     case "interrupt-requested":
-      if (
-        control.status === "none" ||
-        (control.status === "interrupted" && evidence.mode === "process-abort")
-      ) {
+      if (control.status === "none" || (control.status === "interrupted" && control.mode === "turn-escape")) {
         control = { status: "interrupted", mode: evidence.mode };
       }
       break;
     case "terminate-requested":
-      if (control.status !== "timed-out") {
+      if (control.status === "none" || (control.status === "interrupted" && control.mode === "turn-escape")) {
         control = { status: "terminate-requested", mode: evidence.mode };
       }
       break;
@@ -229,12 +228,8 @@ export function projectAgentRunStatus(state: AgentRunState): AgentRunProjectedSt
     state.process.status === "exited" ||
     (state.transportFailure !== null && state.process.status === "not-started");
 
-  if (state.transportFailure) {
-    return { status: "failed", disposition: "transport-failed", terminal, taskOutcome: "unknown" };
-  }
-  if (state.completionIntent?.reason === "agent-error") {
-    return { status: "failed", disposition: "agent-error", terminal, taskOutcome: "unknown" };
-  }
+  // The first process-ending control request remains the execution cause even
+  // when shutdown subsequently emits agent or transport errors.
   if (state.control.status === "timed-out") {
     return { status: "timed-out", disposition: "timed-out", terminal, taskOutcome: "unknown" };
   }
@@ -243,6 +238,12 @@ export function projectAgentRunStatus(state: AgentRunState): AgentRunProjectedSt
   }
   if (state.control.status === "interrupted" && state.control.mode === "process-abort") {
     return { status: "aborted", disposition: "aborted", terminal, taskOutcome: "unknown" };
+  }
+  if (state.transportFailure) {
+    return { status: "failed", disposition: "transport-failed", terminal, taskOutcome: "unknown" };
+  }
+  if (state.completionIntent?.reason === "agent-error") {
+    return { status: "failed", disposition: "agent-error", terminal, taskOutcome: "unknown" };
   }
   if (state.process.status === "exited") {
     const normalExit = state.process.code === 0 && state.process.signal === null;
@@ -293,8 +294,12 @@ export function projectAgentRunCompletion(
           : projected.disposition === "terminated"
             ? "terminated"
             : "transport-failure";
-  const errorMessage = input.errorMessage ?? state.transportFailure?.message;
-  const sessionRef = input.sessionRef ?? state.session.hostRef;
+  const abnormalExitMessage = projected.disposition === "abnormal-exit" && state.process.status === "exited"
+    ? state.process.signal
+      ? `Process exited from signal ${state.process.signal} without a graceful completion handshake`
+      : `Process exited with code ${state.process.code ?? "unknown"} without a graceful completion handshake`
+    : undefined;
+  const errorMessage = input.errorMessage ?? state.transportFailure?.message ?? abnormalExitMessage;
 
   return deepFreeze({
     runId: state.runId,
@@ -305,7 +310,7 @@ export function projectAgentRunCompletion(
     ...(state.process.status === "exited"
       ? { processExit: { code: state.process.code ?? null, signal: state.process.signal ?? null } }
       : {}),
-    ...(sessionRef === undefined ? {} : { sessionRef }),
+    ...(input.sessionRef === undefined ? {} : { sessionRef: input.sessionRef }),
     ...(errorMessage === undefined ? {} : { errorMessage }),
     ...(input.usage === undefined ? {} : { usage: structuredClone(input.usage) }),
   });

@@ -199,6 +199,55 @@ test("transport failure is terminal only when no process has started", () => {
   });
 });
 
+test("the first process-ending control cause determines disposition", () => {
+  const cases = [
+    {
+      records: [
+        evidence("terminate-requested", { mode: "process-signal" }, { sequence: 1 }),
+        evidence("timeout-fired", { timeoutMs: 1000 }, { sequence: 2 }),
+      ],
+      disposition: "terminated",
+    },
+    {
+      records: [
+        evidence("timeout-fired", { timeoutMs: 1000 }, { sequence: 1 }),
+        evidence("terminate-requested", { mode: "process-signal" }, { sequence: 2 }),
+      ],
+      disposition: "timed-out",
+    },
+    {
+      records: [
+        evidence("interrupt-requested", { mode: "process-abort" }, { sequence: 1 }),
+        evidence("timeout-fired", { timeoutMs: 1000 }, { sequence: 2 }),
+      ],
+      disposition: "aborted",
+    },
+  ];
+
+  for (const { records, disposition } of cases) {
+    assert.equal(projectAgentRunStatus(reduceAll(records)).disposition, disposition);
+  }
+});
+
+test("a timeout outranks later agent and transport errors without erasing them", () => {
+  const afterAgentError = reduceAll([
+    evidence("timeout-fired", { timeoutMs: 1000 }, { sequence: 1 }),
+    evidence("completion-requested", { reason: "agent-error" }, { sequence: 2 }),
+    evidence("process-exited", { code: null, signal: "SIGKILL" }, { sequence: 3 }),
+  ]);
+  assert.equal(afterAgentError.completionIntent?.reason, "agent-error");
+  assert.equal(projectAgentRunCompletion(afterAgentError, { output: "" }).execution, "timed-out");
+
+  const afterTransportError = reduceAll([
+    evidence("timeout-fired", { timeoutMs: 1000 }, { sequence: 1 }),
+    evidence("transport-failed", { message: "stream closed during shutdown" }, { sequence: 2 }),
+    evidence("process-exited", { code: null, signal: "SIGKILL" }, { sequence: 3 }),
+  ]);
+  assert.equal(afterTransportError.transportFailure?.message, "stream closed during shutdown");
+  assert.equal(projectAgentRunStatus(afterTransportError).disposition, "timed-out");
+  assert.equal(projectAgentRunCompletion(afterTransportError, { output: "" }).execution, "timed-out");
+});
+
 test("normal evidence cannot override a recorded timeout", () => {
   const state = reduceAll([
     evidence("timeout-fired", { timeoutMs: 1000 }, { sequence: 1 }),
@@ -230,13 +279,14 @@ test("projects immutable normalized completion evidence only from terminal state
   assert.equal(projectAgentRunCompletion(pending, { output: "premature" }), undefined);
 
   const completed = reduceAll([
-    evidence("host-started", { hostRef: "session-1" }, { sequence: 1 }),
+    evidence("host-started", { hostRef: "pane-1" }, { sequence: 1 }),
     evidence("completion-requested", { reason: "done" }, { sequence: 2 }),
     evidence("agent-settled", {}, { sequence: 3 }),
     evidence("process-exited", { code: 0, signal: null }, { sequence: 4 }),
   ]);
   const completion = projectAgentRunCompletion(completed, {
     output: "finished",
+    sessionRef: "/sessions/pi-session.jsonl",
     usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14, costUsd: 0.01 },
   });
 
@@ -247,11 +297,40 @@ test("projects immutable normalized completion evidence only from terminal state
     taskOutcome: "unknown",
     settled: true,
     processExit: { code: 0, signal: null },
-    sessionRef: "session-1",
+    sessionRef: "/sessions/pi-session.jsonl",
     usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14, costUsd: 0.01 },
   });
   assert.equal(Object.isFrozen(completion), true);
   assert.equal(Object.isFrozen(completion.usage), true);
+});
+
+test("host references are not inferred to be persistent Pi session references", () => {
+  const state = reduceAll([
+    evidence("host-started", { hostRef: "pane-1" }, { sequence: 1 }),
+    evidence("process-exited", { code: 1, signal: null }, { sequence: 2 }),
+  ]);
+
+  const inferred = projectAgentRunCompletion(state, { output: "" });
+  assert.equal(Object.hasOwn(inferred, "sessionRef"), false);
+  assert.equal(projectAgentRunCompletion(state, { output: "", sessionRef: "/sessions/actual.jsonl" }).sessionRef, "/sessions/actual.jsonl");
+});
+
+test("bare abnormal exits become explanatory transport failures", () => {
+  const cases = [
+    [{ code: 7, signal: null }, "Process exited with code 7 without a graceful completion handshake"],
+    [{ code: null, signal: "SIGKILL" }, "Process exited from signal SIGKILL without a graceful completion handshake"],
+    [{ code: 0, signal: null }, "Process exited with code 0 without a graceful completion handshake"],
+  ];
+
+  for (const [processExit, errorMessage] of cases) {
+    const completion = projectAgentRunCompletion(
+      reduceAll([evidence("process-exited", processExit)]),
+      { output: "" },
+    );
+    assert.equal(completion.execution, "transport-failure");
+    assert.deepEqual(completion.processExit, processExit);
+    assert.equal(completion.errorMessage, errorMessage);
+  }
 });
 
 test("completion projection preserves each terminal execution disposition", () => {
