@@ -1,0 +1,29 @@
+{
+  "name": "pi-agent-execution",
+  "version": "0.1.0",
+  "description": "Shared agent definition and lifecycle contracts for Pi consumers",
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test test/**/*.test.js",
+    "check": "npm run typecheck && npm test",
+    "prepack": "npm run check"
+  },
+  "engines": {
+    "node": ">=24.19"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
