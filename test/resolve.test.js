@@ -64,11 +64,26 @@ test("caller cwd is used verbatim when no definition or override cwd exists", ()
   assert.equal(resolveAgentLaunchIntent(minimal, "Task", "relative/caller", {}).cwd, "relative/caller");
 });
 
+test("accepts every public thinking level", () => {
+  for (const thinking of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+    assert.equal(resolveAgentLaunchIntent(definition, "Task", "/caller", { thinking }).effective.thinking, thinking);
+  }
+});
+
 test("invalid explicit thinking is rejected", () => {
   assert.throws(
     () => resolveAgentLaunchIntent(definition, "Task", "/caller", { thinking: "extreme" }),
     /Invalid thinking level 'extreme'/,
   );
+});
+
+test("cyclic preserved metadata is cloned and frozen without overflowing", () => {
+  const self = {};
+  self.self = self;
+  const intent = resolveAgentLaunchIntent({ name: "cyclic", metadata: { extra: self } }, "Task", "/caller");
+
+  assert.equal(intent.definition.metadata.extra.self, intent.definition.metadata.extra);
+  assert.equal(Object.isFrozen(intent.definition.metadata.extra), true);
 });
 
 test("launch intent is deeply immutable and detached from its inputs", () => {

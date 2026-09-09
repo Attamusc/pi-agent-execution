@@ -84,6 +84,27 @@ test("rejects invalid explicit thinking with its source location", () => {
   }]);
 });
 
+test("preserves an explicit system prompt mode when the body is empty", () => {
+  const result = parseAgentDefinition(
+    { path: "/agents/probe.md", content: "---\nname: probe\nsystem-prompt: replace\n---\n" },
+    { requiredFields: ["name"] },
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.definition.systemPrompt, { mode: "replace", text: "" });
+});
+
+test("reports malformed YAML at its source location", () => {
+  const result = parseAgentDefinition(
+    { path: "/agents/malformed.md", content: "---\nname: [broken\n---\n" },
+    { requiredFields: ["name"] },
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.diagnostics[0].path, "/agents/malformed.md");
+  assert.deepEqual(result.diagnostics[0].location, { line: 2, column: 14 });
+});
+
 test("keeps absent optional values absent", () => {
   const result = parseAgentDefinition(
     { path: "/agents/minimal.md", content: "---\nname: minimal\n---\n" },

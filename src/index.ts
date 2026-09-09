@@ -25,13 +25,23 @@ export {
 
 export {
   createAgentRunState,
+  projectAgentRunCompletion,
   projectAgentRunStatus,
   reduceAgentRunEvidence,
+  type AgentRunCompletion,
+  type AgentRunCompletionInput,
   type AgentRunDisposition,
   type AgentRunEvidence,
   type AgentRunProjectedStatus,
   type AgentRunState,
+  type AgentRunUsage,
   type CompletionReason,
   type InterruptMode,
   type TerminationMode,
 } from "./lifecycle.js";
+
+export {
+  extractLatestAssistantOutput,
+  type AssistantOutput,
+  type SessionEntryLike,
+} from "./output.js";

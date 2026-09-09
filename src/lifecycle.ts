@@ -1,3 +1,4 @@
+import { deepFreeze } from "./internal.js";
 import type { AgentLaunchIntent } from "./resolve.js";
 
 export type CompletionReason = "done" | "auto-exit" | "ping" | "agent-error";
@@ -63,6 +64,34 @@ export type AgentRunDisposition =
   | "agent-error"
   | "transport-failed";
 
+export type AgentRunUsage = Readonly<{
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  totalTokens?: number;
+  costUsd?: number;
+}>;
+
+export type AgentRunCompletion = Readonly<{
+  runId: string;
+  execution: "normal-exit" | "agent-error" | "aborted" | "timed-out" | "terminated" | "transport-failure";
+  output: string;
+  taskOutcome: "unknown";
+  settled: boolean;
+  processExit?: Readonly<{ code: number | null; signal: string | null }>;
+  sessionRef?: string;
+  errorMessage?: string;
+  usage?: AgentRunUsage;
+}>;
+
+export type AgentRunCompletionInput = Readonly<{
+  output: string;
+  errorMessage?: string;
+  usage?: AgentRunUsage;
+  sessionRef?: string;
+}>;
+
 export type AgentRunProjectedStatus = Readonly<{
   status:
     | "idle"
@@ -81,14 +110,6 @@ export type AgentRunProjectedStatus = Readonly<{
   terminal: boolean;
   taskOutcome: "unknown";
 }>;
-
-function deepFreeze<T>(value: T): T {
-  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
-    for (const child of Object.values(value)) deepFreeze(child);
-    Object.freeze(value);
-  }
-  return value;
-}
 
 export function createAgentRunState(runId: string): AgentRunState {
   if (!runId.trim()) throw new TypeError("runId must not be blank");
@@ -247,4 +268,45 @@ export function projectAgentRunStatus(state: AgentRunState): AgentRunProjectedSt
     return { status: "running", disposition: "pending", terminal: false, taskOutcome: "unknown" };
   }
   return { status: "idle", disposition: "pending", terminal: false, taskOutcome: "unknown" };
+}
+
+/**
+ * Returns a completion only when lifecycle projection is terminal. Callers must
+ * retain the run when this returns undefined; the helper never manufactures a
+ * successful result from nonterminal evidence.
+ */
+export function projectAgentRunCompletion(
+  state: AgentRunState,
+  input: AgentRunCompletionInput,
+): AgentRunCompletion | undefined {
+  const projected = projectAgentRunStatus(state);
+  if (!projected.terminal) return undefined;
+
+  const execution = projected.disposition === "completed"
+    ? "normal-exit"
+    : projected.disposition === "agent-error"
+      ? "agent-error"
+      : projected.disposition === "aborted"
+        ? "aborted"
+        : projected.disposition === "timed-out"
+          ? "timed-out"
+          : projected.disposition === "terminated"
+            ? "terminated"
+            : "transport-failure";
+  const errorMessage = input.errorMessage ?? state.transportFailure?.message;
+  const sessionRef = input.sessionRef ?? state.session.hostRef;
+
+  return deepFreeze({
+    runId: state.runId,
+    execution,
+    output: input.output,
+    taskOutcome: "unknown",
+    settled: state.execution.status === "settled",
+    ...(state.process.status === "exited"
+      ? { processExit: { code: state.process.code ?? null, signal: state.process.signal ?? null } }
+      : {}),
+    ...(sessionRef === undefined ? {} : { sessionRef }),
+    ...(errorMessage === undefined ? {} : { errorMessage }),
+    ...(input.usage === undefined ? {} : { usage: structuredClone(input.usage) }),
+  });
 }

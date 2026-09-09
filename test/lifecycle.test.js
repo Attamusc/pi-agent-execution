@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   createAgentRunState,
+  projectAgentRunCompletion,
   projectAgentRunStatus,
   reduceAgentRunEvidence,
 } from "../dist/index.js";
@@ -222,6 +223,58 @@ test("normal intent and turn escape cannot override recorded failures or termina
     evidence("interrupt-requested", { mode: "turn-escape" }, { sequence: 2 }),
   ]);
   assert.equal(projectAgentRunStatus(terminated).disposition, "terminated");
+});
+
+test("projects immutable normalized completion evidence only from terminal state", () => {
+  const pending = reduceAll([evidence("completion-requested", { reason: "done" })]);
+  assert.equal(projectAgentRunCompletion(pending, { output: "premature" }), undefined);
+
+  const completed = reduceAll([
+    evidence("host-started", { hostRef: "session-1" }, { sequence: 1 }),
+    evidence("completion-requested", { reason: "done" }, { sequence: 2 }),
+    evidence("agent-settled", {}, { sequence: 3 }),
+    evidence("process-exited", { code: 0, signal: null }, { sequence: 4 }),
+  ]);
+  const completion = projectAgentRunCompletion(completed, {
+    output: "finished",
+    usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14, costUsd: 0.01 },
+  });
+
+  assert.deepEqual(completion, {
+    runId,
+    execution: "normal-exit",
+    output: "finished",
+    taskOutcome: "unknown",
+    settled: true,
+    processExit: { code: 0, signal: null },
+    sessionRef: "session-1",
+    usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14, costUsd: 0.01 },
+  });
+  assert.equal(Object.isFrozen(completion), true);
+  assert.equal(Object.isFrozen(completion.usage), true);
+});
+
+test("completion projection preserves each terminal execution disposition", () => {
+  const cases = [
+    [
+      [evidence("completion-requested", { reason: "agent-error" }, { sequence: 1 }), evidence("process-exited", { code: 1, signal: null }, { sequence: 2 })],
+      { execution: "agent-error", errorMessage: "provider failed" },
+    ],
+    [[evidence("interrupt-requested", { mode: "process-abort" }, { sequence: 1 }), evidence("process-exited", { code: null, signal: "SIGTERM" }, { sequence: 2 })], { execution: "aborted" }],
+    [[evidence("timeout-fired", { timeoutMs: 10 }, { sequence: 1 }), evidence("process-exited", { code: null, signal: "SIGKILL" }, { sequence: 2 })], { execution: "timed-out" }],
+    [[evidence("terminate-requested", { mode: "process-signal" }, { sequence: 1 }), evidence("process-exited", { code: null, signal: "SIGTERM" }, { sequence: 2 })], { execution: "terminated" }],
+    [[evidence("transport-failed", { message: "stream broke" })], { execution: "transport-failure", errorMessage: "stream broke" }],
+  ];
+
+  for (const [records, expected] of cases) {
+    const completion = projectAgentRunCompletion(reduceAll(records), {
+      output: "",
+      ...(expected.errorMessage ? { errorMessage: expected.errorMessage } : {}),
+    });
+    assert.equal(completion.execution, expected.execution);
+    assert.equal(completion.errorMessage, expected.errorMessage);
+    assert.equal(completion.taskOutcome, "unknown");
+  }
 });
 
 test("state and nested axes are immutable", () => {

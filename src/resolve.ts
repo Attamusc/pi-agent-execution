@@ -1,4 +1,5 @@
 import type { NormalizedAgentDefinition, ThinkingLevel } from "./definitions.js";
+import { deepFreeze, isThinkingLevel } from "./internal.js";
 
 export type AgentLaunchOverrides = Readonly<{
   model?: string;
@@ -22,19 +23,9 @@ export type AgentLaunchIntent = Readonly<{
   }>;
 }>;
 
-const thinkingLevels = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-
 function nonblank(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
-}
-
-function deepFreeze<T>(value: T): T {
-  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
-    for (const child of Object.values(value)) deepFreeze(child);
-    Object.freeze(value);
-  }
-  return value;
 }
 
 export function resolveAgentLaunchIntent(
@@ -44,7 +35,7 @@ export function resolveAgentLaunchIntent(
   overrides: AgentLaunchOverrides = {},
 ): AgentLaunchIntent {
   const explicitThinking = nonblank(overrides.thinking);
-  if (explicitThinking !== undefined && !thinkingLevels.has(explicitThinking as ThinkingLevel)) {
+  if (explicitThinking !== undefined && !isThinkingLevel(explicitThinking)) {
     throw new TypeError(`Invalid thinking level '${explicitThinking}'`);
   }
 

@@ -1,5 +1,7 @@
 import { LineCounter, parseDocument } from "yaml";
 
+import { isThinkingLevel } from "./internal.js";
+
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export type Diagnostic = Readonly<{
@@ -30,7 +32,6 @@ export type ParseAgentDefinitionResult =
   | Readonly<{ ok: true; definition: NormalizedAgentDefinition; diagnostics: readonly Diagnostic[] }>
   | Readonly<{ ok: false; diagnostics: readonly Diagnostic[] }>;
 
-const thinkingLevels = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const normalizedKeys = new Set(["name", "description", "model", "thinking", "tools", "skill", "skills", "system-prompt", "cwd"]);
 
 function fieldLocation(frontmatter: string, field: string): { line: number; column: number } | undefined {
@@ -63,7 +64,7 @@ export function parseAgentDefinition(
     return {
       ok: false,
       diagnostics: document.errors.map((error) => {
-        const position = error.linePos?.[0];
+        const position = error.linePos?.[0] ?? (error.pos[0] === undefined ? undefined : lineCounter.linePos(error.pos[0]));
         return {
           path: source.path,
           location: position ? { line: position.line + 1, column: position.col } : undefined,
@@ -73,7 +74,19 @@ export function parseAgentDefinition(
     };
   }
 
-  const parsed: unknown = document.toJS();
+  let parsed: unknown;
+  try {
+    parsed = document.toJS();
+  } catch (error) {
+    return {
+      ok: false,
+      diagnostics: [{
+        path: source.path,
+        location: { line: 2, column: 1 },
+        message: error instanceof Error ? error.message : "Unable to convert agent frontmatter",
+      }],
+    };
+  }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     return { ok: false, diagnostics: [{ path: source.path, location: { line: 2, column: 1 }, message: "Agent frontmatter must be a mapping" }] };
   }
@@ -102,7 +115,7 @@ export function parseAgentDefinition(
 
   let thinking: ThinkingLevel | undefined;
   if (thinkingValue !== undefined) {
-    if (thinkingLevels.has(thinkingValue as ThinkingLevel)) thinking = thinkingValue as ThinkingLevel;
+    if (isThinkingLevel(thinkingValue)) thinking = thinkingValue;
     else diagnostics.push({ path: source.path, field: "thinking", location: fieldLocation(frontmatter, "thinking"), message: `Invalid thinking level '${thinkingValue}'` });
   }
 
@@ -127,7 +140,7 @@ export function parseAgentDefinition(
     ...(thinking === undefined ? {} : { thinking }),
     ...(tools === undefined ? {} : { tools }),
     ...(skills === undefined ? {} : { skills }),
-    ...(body.length === 0 ? {} : { systemPrompt: { mode: promptMode, text: body } }),
+    ...(body.length === 0 && promptModeValue === undefined ? {} : { systemPrompt: { mode: promptMode, text: body } }),
     ...(cwd === undefined ? {} : { cwd }),
     metadata,
   };

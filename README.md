@@ -1,24 +1,119 @@
 # pi-agent-execution
 
-Shared, process-neutral contracts for agent definitions and execution lifecycle semantics used by Pi consumers.
+Shared, process-neutral contracts for Pi agent definitions and run lifecycle semantics. This is an ordinary ESM library, not a Pi extension. It does not discover definitions, create processes or panes, own sessions, schedule work, apply workflow policy, or deliver results.
 
-This package is an ordinary ESM library. It is not a Pi extension and does not own processes, sessions, workflow policy, or terminal presentation.
+## Package contract
 
-## Usage
+The package requires Node.js 24.19 or newer and exposes only its root ESM entry point. `contractVersion` is `1`; consumers should assert it during tests or build when pinning a revision.
 
 ```ts
-import { contractVersion } from "pi-agent-execution";
+import {
+  contractVersion,
+  parseAgentDefinition,
+  resolveAgentLaunchIntent,
+  workflowHeadlessCapabilities,
+} from "pi-agent-execution";
 
-if (contractVersion !== 1) {
-  throw new Error("Unsupported pi-agent-execution contract version");
-}
+if (contractVersion !== 1) throw new Error("Unsupported execution contract");
 ```
 
-## Development
+Published tarballs contain `dist` and this README. `prepare` performs a build-only TypeScript compilation, so ordinary npm installs from an immutable Git revision also create `dist`; it does not install or configure Pi. `npm pack` and Git dependencies therefore use the same root import and generated declarations. There are no supported deep imports.
 
-Requires Node.js 24.19 or newer.
+## Definition and launch intent
+
+```ts
+parseAgentDefinition(
+  { path: string, content: string },
+  { fallbackName?: string, requiredFields: readonly ("name" | "description")[] },
+): ParseAgentDefinitionResult
+
+resolveAgentLaunchIntent(
+  definition: NormalizedAgentDefinition,
+  task: string,
+  callerCwd: string,
+  overrides?: AgentLaunchOverrides,
+): AgentLaunchIntent
+```
+
+Parsing returns a discriminated result with source-located diagnostics. Discovery and eligibility remain caller policy. Optional values remain absent, except an explicitly declared `system-prompt` mode is represented even when its prompt body is empty, allowing a later caller override to preserve that mode. Unrecognized YAML metadata is preserved. The resolved intent is detached from inputs and deeply immutable, including cyclic metadata.
+
+Supported thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Invalid explicit values are rejected before host creation.
+
+## Capabilities
+
+Capability profiles describe exact host operations. `requireCapability(profile, key)` returns the declared mode or throws `UnsupportedAgentRunCapability`; it never substitutes another operation.
+
+| Axis | Mode | Meaning |
+| --- | --- | --- |
+| `session` | `ephemeral` | A run does not retain a Pi session. |
+| | `persistent` | The host retains a Pi session. |
+| `progress` | `pi-json-events` | Progress comes from Pi's JSON event stream. |
+| | `activity-snapshot` | Progress comes from host activity snapshots. |
+| `interrupt` | `process-abort` | Interrupt aborts the hosted process. |
+| | `turn-escape` | Interrupt ends only the active Pi turn. |
+| `termination` | `process-signal` | Termination is performed with process signals. |
+| | `herdr-pane-close` | Termination closes the selected Herdr pane. |
+| `timeout` | `process-deadline` | The host enforces a process deadline. |
+| | `unsupported` | The host has no timeout operation. |
+| `resume` | `pi-session-file` | The host can resume a Pi session file. |
+| | `unsupported` | Resume is unavailable. |
+| `fork` | `seeded-pi-session` | The host can seed a forked Pi session. |
+| | `unsupported` | Fork is unavailable. |
+| `interaction` | `none` | There is no user takeover. |
+| | `user-takeover` | A user can interact with the running session. |
+
+`workflowHeadlessCapabilities` uses ephemeral sessions, JSON progress, process abort/signals/deadlines, no resume or fork, and no takeover. `visibleHerdrCapabilities` uses persistent sessions, activity snapshots, turn Escape, pane closure, session resume/fork, and takeover; timeout is unsupported.
+
+## Lifecycle
+
+Create state with `createAgentRunState(runId)`, fold correlated records with `reduceAgentRunEvidence(state, evidence)`, and inspect it with `projectAgentRunStatus(state)`. Evidence is ordered independently per `sourceId` by monotonic `sequence`; wrong-run, malformed, and stale records are ignored.
+
+The state keeps facts on separate axes:
+
+| Axis | States and meaning |
+| --- | --- |
+| Execution | `idle`, `launching`, `active`, `settling`, `settled`; Pi settlement does not imply process exit. |
+| Completion intent | none, `done`, `auto-exit`, `ping`, or `agent-error`; intent does not imply settlement or exit. |
+| Session | `unknown`, `open`, or `closed`, with optional host reference and shutdown reason. |
+| Process | `not-started`, `starting`, `running`, or `exited`, with optional exit code and signal. Correlated exit is authoritative once startup begins. |
+| Control | none, turn/process interruption, termination request, or timeout. Timeout, abort, and termination remain distinct. |
+| Transport | optional failure evidence. A pre-start transport failure is terminal; transport loss while running is not terminal until process exit. |
+| Task outcome | always `unknown` in contract version 1. No prose classification or structured outcome protocol is required. |
+
+Late launch/host evidence cannot reopen a closed session or resurrect an exited process, and ordinary later evidence cannot erase timeout, termination, or agent-error facts.
+
+### Normalized completion
+
+```ts
+projectAgentRunCompletion(
+  state: AgentRunState,
+  input: {
+    output: string;
+    errorMessage?: string;
+    usage?: AgentRunUsage;
+    sessionRef?: string;
+  },
+): AgentRunCompletion | undefined
+```
+
+The helper returns `undefined` when status projection is nonterminal. A caller must retain the run rather than manufacture a normal result. A terminal record contains `runId`, one execution value (`normal-exit`, `agent-error`, `aborted`, `timed-out`, `terminated`, or `transport-failure`), output, `taskOutcome: "unknown"`, settlement evidence, optional process exit/session/error data, and optional host-provided usage (`inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `totalTokens`, `costUsd`). It is deeply immutable.
+
+`normal-exit` certifies only the execution handshake: completion intent, Pi settlement, and zero process exit without a signal. It does **not** certify that the assigned business task succeeded. Abnormal or uncorrelated exits project as transport failure evidence rather than task failure or success.
+
+## Assistant output seam
+
+```ts
+extractLatestAssistantOutput(
+  entries: readonly SessionEntryLike[],
+): { output: string; errorMessage?: string }
+```
+
+The structural seam accepts current Pi `SessionMessageEntry`-shaped values or their contained `AgentMessage` values without importing unsupported Pi internals. The caller must first select the active session branch. The extractor finds the latest assistant message, joins all of its text blocks in order with newlines, and ignores thinking and tool-call blocks. If that latest message has terminal error evidence and no text, it returns the error and never searches older assistant text. No assistant message yields empty output.
+
+## Development
 
 ```sh
 npm install
 npm run check
+npm pack --dry-run
 ```
