@@ -28,6 +28,33 @@ function reduceAll(records, state = createAgentRunState(runId)) {
   return records.reduce(reduceAgentRunEvidence, state);
 }
 
+test("reducing exit evidence does not freeze or retain caller-owned data", () => {
+  const record = evidence("process-exited", nativeExit(0, null));
+  const state = reduceAgentRunEvidence(createAgentRunState(runId), record);
+
+  assert.equal(Object.isFrozen(record.exit), false);
+  assert.notEqual(state.process.exit, record.exit);
+  assert.equal(Object.isFrozen(state.process.exit), true);
+  record.exit.code = 7;
+  assert.equal(state.process.exit.code, 0);
+});
+
+test("exit and proven start failure cannot overwrite one another", () => {
+  const exited = reduceAll([
+    evidence("process-exited", nativeExit(0, null)),
+    evidence("host-start-failed", { message: "late dispatch failure" }, { sequence: 2 }),
+  ]);
+  assert.equal(exited.process.status, "exited");
+  assert.equal(exited.startFailure, null);
+
+  const failed = reduceAll([
+    evidence("host-start-failed", { message: "spawn ENOENT" }),
+    evidence("process-exited", nativeExit(0, null), { sequence: 2 }),
+  ]);
+  assert.equal(failed.process.status, "failed-to-start");
+  assert.equal(failed.process.exit, undefined);
+});
+
 const lifecycleCases = [
   {
     name: "done without settlement is non-terminal finishing",

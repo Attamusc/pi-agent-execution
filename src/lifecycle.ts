@@ -198,7 +198,7 @@ export function reduceAgentRunEvidence(
       break;
     case "process-exited":
       if (process.status !== "exited" && process.status !== "failed-to-start") {
-        process = { status: "exited", exit: evidence.exit };
+        process = { status: "exited", exit: { ...evidence.exit } };
       }
       break;
     case "timeout-fired":
