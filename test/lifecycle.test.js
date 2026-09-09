@@ -1,0 +1,185 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  createAgentRunState,
+  projectAgentRunStatus,
+  reduceAgentRunEvidence,
+} from "../dist/index.js";
+
+const runId = "run-1";
+
+function evidence(kind, data = {}, overrides = {}) {
+  return {
+    kind,
+    runId,
+    sourceId: "child",
+    sequence: 1,
+    observedAt: "2026-09-09T20:00:00.000Z",
+    ...data,
+    ...overrides,
+  };
+}
+
+function reduceAll(records, state = createAgentRunState(runId)) {
+  return records.reduce(reduceAgentRunEvidence, state);
+}
+
+const lifecycleCases = [
+  {
+    name: "done without settlement is non-terminal finishing",
+    records: [evidence("completion-requested", { reason: "done" })],
+    expected: { status: "finishing", terminal: false, disposition: "pending" },
+  },
+  {
+    name: "settled without completion intent remains waiting-capable",
+    records: [evidence("agent-settled")],
+    expected: { status: "waiting", terminal: false, disposition: "pending" },
+  },
+  {
+    name: "graceful completion requires intent, settlement, shutdown, and zero exit",
+    records: [
+      evidence("completion-requested", { reason: "done" }, { sequence: 1 }),
+      evidence("agent-settled", {}, { sequence: 2 }),
+      evidence("session-shutdown", { reason: "quit" }, { sequence: 3 }),
+      evidence("process-exited", { code: 0, signal: null }, { sourceId: "wrapper" }),
+    ],
+    expected: { status: "completed", terminal: true, disposition: "completed" },
+  },
+  {
+    name: "zero exit without completion intent is abnormal",
+    records: [evidence("process-exited", { code: 0, signal: null })],
+    expected: { status: "abnormal", terminal: true, disposition: "abnormal-exit" },
+  },
+  {
+    name: "nonzero exit with completion intent is abnormal",
+    records: [
+      evidence("completion-requested", { reason: "done" }, { sequence: 1 }),
+      evidence("agent-settled", {}, { sequence: 2 }),
+      evidence("process-exited", { code: 7, signal: null }, { sequence: 3 }),
+    ],
+    expected: { status: "abnormal", terminal: true, disposition: "abnormal-exit" },
+  },
+  {
+    name: "signal exit with completion intent is abnormal",
+    records: [
+      evidence("completion-requested", { reason: "done" }, { sequence: 1 }),
+      evidence("agent-settled", {}, { sequence: 2 }),
+      evidence("process-exited", { code: null, signal: "SIGKILL" }, { sequence: 3 }),
+    ],
+    expected: { status: "abnormal", terminal: true, disposition: "abnormal-exit" },
+  },
+  {
+    name: "timeout is distinct",
+    records: [evidence("timeout-fired", { timeoutMs: 1000 })],
+    expected: { status: "timed-out", terminal: false, disposition: "timed-out" },
+  },
+  {
+    name: "process abort is distinct",
+    records: [evidence("interrupt-requested", { mode: "process-abort" })],
+    expected: { status: "aborted", terminal: false, disposition: "aborted" },
+  },
+  {
+    name: "turn escape is a non-terminal interruption",
+    records: [evidence("interrupt-requested", { mode: "turn-escape" })],
+    expected: { status: "interrupted", terminal: false, disposition: "interrupted" },
+  },
+  {
+    name: "hard termination is distinct",
+    records: [evidence("terminate-requested", { mode: "herdr-pane-close" })],
+    expected: { status: "terminated", terminal: false, disposition: "terminated" },
+  },
+  {
+    name: "provider completion errors are failures",
+    records: [evidence("completion-requested", { reason: "agent-error" })],
+    expected: { status: "failed", terminal: false, disposition: "agent-error" },
+  },
+  {
+    name: "transport failures are failures",
+    records: [evidence("transport-failed", { message: "stream broke" })],
+    expected: { status: "failed", terminal: true, disposition: "transport-failed" },
+  },
+];
+
+for (const { name, records, expected } of lifecycleCases) {
+  test(name, () => {
+    const projected = projectAgentRunStatus(reduceAll(records));
+    assert.deepEqual(
+      { status: projected.status, terminal: projected.terminal, disposition: projected.disposition },
+      expected,
+    );
+    assert.equal(projected.taskOutcome, "unknown");
+  });
+}
+
+test("retrying agent_end does not assert settlement", () => {
+  const state = reduceAll([evidence("agent-ended", { willRetry: true })]);
+  assert.equal(state.execution.status, "active");
+  assert.equal(projectAgentRunStatus(state).status, "running");
+});
+
+test("later progress resumes a settled waiting run and clears turn-only interruption", () => {
+  const state = reduceAll([
+    evidence("agent-settled", {}, { sequence: 1 }),
+    evidence("interrupt-requested", { mode: "turn-escape" }, { sequence: 2 }),
+    evidence("progress", { activity: "resumed", estimated: false }, { sequence: 3 }),
+  ]);
+  assert.equal(state.execution.status, "active");
+  assert.equal(state.control.status, "none");
+  assert.equal(projectAgentRunStatus(state).status, "running");
+});
+
+test("cross-source ordering uses source-local sequences rather than timestamps", () => {
+  const state = reduceAll([
+    evidence("host-started", { hostRef: "pane-1" }, { sourceId: "host", sequence: 10, observedAt: "2026-09-09T20:10:00.000Z" }),
+    evidence("completion-requested", { reason: "done" }, { sourceId: "child", sequence: 1, observedAt: "2026-09-09T20:00:00.000Z" }),
+    evidence("agent-settled", {}, { sourceId: "child", sequence: 2, observedAt: "2026-09-09T19:00:00.000Z" }),
+  ]);
+  assert.equal(state.completionIntent?.reason, "done");
+  assert.equal(state.execution.status, "settled");
+  assert.deepEqual(state.lastSequenceBySource, { host: 10, child: 2 });
+});
+
+test("wrong-run and stale source evidence are ignored without mutation", () => {
+  const initial = reduceAgentRunEvidence(
+    createAgentRunState(runId),
+    evidence("host-started", { hostRef: "pane-1" }, { sequence: 2 }),
+  );
+  const wrongRun = reduceAgentRunEvidence(initial, evidence("timeout-fired", { timeoutMs: 1 }, { runId: "run-2", sequence: 99 }));
+  const stale = reduceAgentRunEvidence(initial, evidence("timeout-fired", { timeoutMs: 1 }, { sequence: 2 }));
+  assert.equal(wrongRun, initial);
+  assert.equal(stale, initial);
+});
+
+test("normal evidence cannot override a recorded timeout", () => {
+  const state = reduceAll([
+    evidence("timeout-fired", { timeoutMs: 1000 }, { sequence: 1 }),
+    evidence("completion-requested", { reason: "done" }, { sequence: 2 }),
+    evidence("agent-settled", {}, { sequence: 3 }),
+    evidence("process-exited", { code: 0, signal: null }, { sequence: 4 }),
+  ]);
+  const projected = projectAgentRunStatus(state);
+  assert.equal(projected.disposition, "timed-out");
+  assert.equal(projected.terminal, true);
+});
+
+test("normal intent and turn escape cannot override recorded failures or termination", () => {
+  const failed = reduceAll([
+    evidence("completion-requested", { reason: "agent-error" }, { sequence: 1 }),
+    evidence("completion-requested", { reason: "done" }, { sequence: 2 }),
+  ]);
+  assert.equal(projectAgentRunStatus(failed).disposition, "agent-error");
+
+  const terminated = reduceAll([
+    evidence("terminate-requested", { mode: "herdr-pane-close" }, { sequence: 1 }),
+    evidence("interrupt-requested", { mode: "turn-escape" }, { sequence: 2 }),
+  ]);
+  assert.equal(projectAgentRunStatus(terminated).disposition, "terminated");
+});
+
+test("state and nested axes are immutable", () => {
+  const state = reduceAll([evidence("process-exited", { code: 0, signal: null })]);
+  assert.equal(Object.isFrozen(state), true);
+  assert.equal(Object.isFrozen(state.process), true);
+  assert.equal(Object.isFrozen(state.lastSequenceBySource), true);
+});

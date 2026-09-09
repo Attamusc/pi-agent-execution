@@ -22,3 +22,16 @@ export {
   type AgentLaunchIntent,
   type AgentLaunchOverrides,
 } from "./resolve.js";
+
+export {
+  createAgentRunState,
+  projectAgentRunStatus,
+  reduceAgentRunEvidence,
+  type AgentRunDisposition,
+  type AgentRunEvidence,
+  type AgentRunProjectedStatus,
+  type AgentRunState,
+  type CompletionReason,
+  type InterruptMode,
+  type TerminationMode,
+} from "./lifecycle.js";
