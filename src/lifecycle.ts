@@ -3,7 +3,7 @@ import type { AgentLaunchIntent } from "./resolve.js";
 
 export type CompletionReason = "done" | "auto-exit" | "ping" | "agent-error";
 export type InterruptMode = "process-abort" | "turn-escape";
-export type TerminationMode = "process-signal" | "herdr-pane-close";
+export type TerminationMode = "process-signal" | "herdr-pane-close" | "rex-block-close";
 
 export type AgentProcessExit =
   | Readonly<{ kind: "native"; code: number | null; signal: string | null }>

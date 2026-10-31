@@ -4,6 +4,7 @@ export {
   UnsupportedAgentRunCapability,
   requireCapability,
   visibleHerdrCapabilities,
+  visibleRexCapabilities,
   workflowHeadlessCapabilities,
   type AgentRunCapabilities,
 } from "./capabilities.js";

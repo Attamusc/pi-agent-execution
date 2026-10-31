@@ -53,6 +53,7 @@ Capability profiles describe exact host operations. `requireCapability(profile, 
 | | `turn-escape` | Interrupt ends only the active Pi turn. |
 | `termination` | `process-signal` | Termination is performed with process signals. |
 | | `herdr-pane-close` | Termination closes the selected Herdr pane. |
+| | `rex-block-close` | Termination closes the selected Rex block. |
 | `timeout` | `process-deadline` | The host enforces a process deadline. |
 | | `unsupported` | The host has no timeout operation. |
 | `resume` | `pi-session-file` | The host can resume a Pi session file. |
@@ -63,6 +64,8 @@ Capability profiles describe exact host operations. `requireCapability(profile, 
 | | `user-takeover` | A user can interact with the running session. |
 
 `workflowHeadlessCapabilities` uses ephemeral sessions, JSON progress, process abort/signals/deadlines, no resume or fork, and no takeover. `visibleHerdrCapabilities` uses persistent sessions, activity snapshots, turn Escape, pane closure, session resume/fork, and takeover; timeout is unsupported.
+
+`visibleRexCapabilities` separately declares persistent sessions, activity snapshots, turn Escape, Rex block closure, Pi session-file resume, seeded session fork, and user takeover; timeout remains unsupported. This additive profile describes the experimental Rex POC contract, not a runtime implementation or stability designation. Candidate commit references provide reproducibility only; they do not replace known-good Herdr or other-backend pins or authorize publishing or promotion. A `terminate-requested` record retains `rex-block-close` as its mode but cannot produce a terminal completion while the process remains alive; correlated process-exit evidence is still required.
 
 ## Lifecycle
 

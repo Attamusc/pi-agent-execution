@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import * as execution from "../dist/index.js";
 
 import {
   UnsupportedAgentRunCapability,
@@ -7,6 +8,26 @@ import {
   visibleHerdrCapabilities,
   workflowHeadlessCapabilities,
 } from "../dist/index.js";
+
+test("visible Rex capabilities expose exact persistent modes without a timeout fallback", () => {
+  const profile = execution.visibleRexCapabilities;
+  assert.deepEqual(profile, {
+    session: "persistent",
+    progress: "activity-snapshot",
+    interrupt: "turn-escape",
+    termination: "rex-block-close",
+    timeout: "unsupported",
+    resume: "pi-session-file",
+    fork: "seeded-pi-session",
+    interaction: "user-takeover",
+  });
+  assert.equal(requireCapability(profile, "interrupt"), "turn-escape");
+  assert.equal(requireCapability(profile, "termination"), "rex-block-close");
+  assert.throws(
+    () => requireCapability(profile, "timeout"),
+    (error) => error instanceof UnsupportedAgentRunCapability && error.capability === "timeout",
+  );
+});
 
 test("headless workflow capabilities expose exact host modes", () => {
   assert.deepEqual(workflowHeadlessCapabilities, {

@@ -2,7 +2,7 @@ export type AgentRunCapabilities = Readonly<{
   session: "ephemeral" | "persistent";
   progress: "pi-json-events" | "activity-snapshot";
   interrupt: "process-abort" | "turn-escape";
-  termination: "process-signal" | "herdr-pane-close";
+  termination: "process-signal" | "herdr-pane-close" | "rex-block-close";
   timeout: "process-deadline" | "unsupported";
   resume: "unsupported" | "pi-session-file";
   fork: "unsupported" | "seeded-pi-session";
@@ -25,6 +25,17 @@ export const visibleHerdrCapabilities = {
   progress: "activity-snapshot",
   interrupt: "turn-escape",
   termination: "herdr-pane-close",
+  timeout: "unsupported",
+  resume: "pi-session-file",
+  fork: "seeded-pi-session",
+  interaction: "user-takeover",
+} as const satisfies AgentRunCapabilities;
+
+export const visibleRexCapabilities = {
+  session: "persistent",
+  progress: "activity-snapshot",
+  interrupt: "turn-escape",
+  termination: "rex-block-close",
   timeout: "unsupported",
   resume: "pi-session-file",
   fork: "seeded-pi-session",

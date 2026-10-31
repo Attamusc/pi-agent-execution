@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import * as execution from "../dist/index.js";
 
 import {
   createAgentRunState,
@@ -27,6 +28,32 @@ function evidence(kind, data = {}, overrides = {}) {
 function reduceAll(records, state = createAgentRunState(runId)) {
   return records.reduce(reduceAgentRunEvidence, state);
 }
+
+test("Rex block-close preserves its mode and waits for correlated exit before completion", () => {
+  assert.equal(execution.visibleRexCapabilities?.termination, "rex-block-close");
+  const running = reduceAll([
+    evidence("host-started", { hostRef: "rex-owned-block" }, { sequence: 1 }),
+    evidence("terminate-requested", { mode: "rex-block-close" }, { sequence: 2 }),
+  ]);
+  assert.deepEqual(running.control, { status: "terminate-requested", mode: "rex-block-close" });
+  assert.equal(running.process.status, "running");
+  assert.equal(projectAgentRunStatus(running).terminal, false);
+  assert.equal(projectAgentRunCompletion(running, { output: "" }), undefined);
+
+  const wrongRun = reduceAgentRunEvidence(running,
+    evidence("process-exited", nativeExit(0, null), { runId: "other-run", sequence: 3 }));
+  const stale = reduceAgentRunEvidence(running,
+    evidence("process-exited", nativeExit(0, null), { sequence: 2 }));
+  assert.equal(wrongRun, running);
+  assert.equal(stale, running);
+  assert.equal(projectAgentRunCompletion(stale, { output: "" }), undefined);
+
+  const exited = reduceAgentRunEvidence(running,
+    evidence("process-exited", { exit: { kind: "process-not-found" } }, { sourceId: "owned-process", sequence: 1 }));
+  assert.deepEqual(exited.control, { status: "terminate-requested", mode: "rex-block-close" });
+  assert.equal(projectAgentRunStatus(exited).terminal, true);
+  assert.equal(projectAgentRunCompletion(exited, { output: "" }).execution, "terminated");
+});
 
 test("reducing exit evidence does not freeze or retain caller-owned data", () => {
   const record = evidence("process-exited", nativeExit(0, null));
