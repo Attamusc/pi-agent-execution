@@ -2,7 +2,7 @@ export type AgentRunCapabilities = Readonly<{
   session: "ephemeral" | "persistent";
   progress: "pi-json-events" | "activity-snapshot";
   interrupt: "process-abort" | "turn-escape";
-  termination: "process-signal" | "herdr-pane-close";
+  termination: "process-signal" | "herdr-pane-close" | "core-terminal-kill";
   timeout: "process-deadline" | "unsupported";
   resume: "unsupported" | "pi-session-file";
   fork: "unsupported" | "seeded-pi-session";
@@ -29,6 +29,11 @@ export const visibleHerdrCapabilities = {
   resume: "pi-session-file",
   fork: "seeded-pi-session",
   interaction: "user-takeover",
+} as const satisfies AgentRunCapabilities;
+
+export const visibleHerdrCoreCapabilities = {
+  ...visibleHerdrCapabilities,
+  termination: "core-terminal-kill",
 } as const satisfies AgentRunCapabilities;
 
 export class UnsupportedAgentRunCapability extends Error {

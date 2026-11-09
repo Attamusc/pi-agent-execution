@@ -53,6 +53,7 @@ Capability profiles describe exact host operations. `requireCapability(profile, 
 | | `turn-escape` | Interrupt ends only the active Pi turn. |
 | `termination` | `process-signal` | Termination is performed with process signals. |
 | | `herdr-pane-close` | Termination closes the selected Herdr pane. |
+| | `core-terminal-kill` | Termination asks Herdr Core to end the selected terminal program; record removal is separate. |
 | `timeout` | `process-deadline` | The host enforces a process deadline. |
 | | `unsupported` | The host has no timeout operation. |
 | `resume` | `pi-session-file` | The host can resume a Pi session file. |
@@ -62,7 +63,7 @@ Capability profiles describe exact host operations. `requireCapability(profile, 
 | `interaction` | `none` | There is no user takeover. |
 | | `user-takeover` | A user can interact with the running session. |
 
-`workflowHeadlessCapabilities` uses ephemeral sessions, JSON progress, process abort/signals/deadlines, no resume or fork, and no takeover. `visibleHerdrCapabilities` uses persistent sessions, activity snapshots, turn Escape, pane closure, session resume/fork, and takeover; timeout is unsupported.
+`workflowHeadlessCapabilities` uses ephemeral sessions, JSON progress, process abort/signals/deadlines, no resume or fork, and no takeover. `visibleHerdrCapabilities` uses persistent sessions, activity snapshots, turn Escape, pane closure, session resume/fork, and takeover; timeout is unsupported. `visibleHerdrCoreCapabilities` retains those session operations but uses `core-terminal-kill`. A kill request does not prove process exit, successful work or terminal-record removal; consumers must observe those separately.
 
 ## Lifecycle
 
