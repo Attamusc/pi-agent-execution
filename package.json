@@ -1,6 +1,6 @@
 {
   "name": "pi-agent-execution",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Shared agent definition and lifecycle contracts for Pi consumers",
   "type": "module",
   "files": [

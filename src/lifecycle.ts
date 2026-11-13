@@ -34,10 +34,14 @@ export type AgentRunEvidence =
   | Evidence<"timeout-fired", { timeoutMs: number }>
   | Evidence<"interrupt-requested", { mode: InterruptMode }>
   | Evidence<"terminate-requested", { mode: TerminationMode }>
-  | Evidence<"transport-failed", { message: string }>;
+  | Evidence<"transport-failed", { message: string }>
+  | Evidence<"request-timeout", { operation: string; timeoutMs: number }>
+  | Evidence<"job-output-captured", { output: string }>;
 
 export type AgentRunState = Readonly<{
   runId: string;
+  completionMode: "pi-handshake" | "native-job";
+  jobOutput: string | null;
   execution: Readonly<{
     status: "idle" | "launching" | "active" | "settling" | "settled";
   }>;
@@ -87,6 +91,7 @@ export type AgentRunCompletion = Readonly<{
   output: string;
   taskOutcome: "unknown";
   settled: boolean;
+  completionEvidence?: "native-job-exit-output";
   processExit?: AgentProcessExit;
   sessionRef?: string;
   errorMessage?: string;
@@ -119,10 +124,13 @@ export type AgentRunProjectedStatus = Readonly<{
   taskOutcome: "unknown";
 }>;
 
-export function createAgentRunState(runId: string): AgentRunState {
+export function createAgentRunState(runId: string, completionMode: "pi-handshake" | "native-job" = "pi-handshake"): AgentRunState {
+  if (completionMode !== "pi-handshake" && completionMode !== "native-job") throw new TypeError("Unknown completion mode");
   if (!runId.trim()) throw new TypeError("runId must not be blank");
   return deepFreeze({
     runId,
+    completionMode,
+    jobOutput: null,
     execution: { status: "idle" },
     completionIntent: null,
     session: { status: "unknown" },
@@ -150,6 +158,7 @@ export function reduceAgentRunEvidence(
   let startFailure = state.startFailure;
   let control = state.control;
   let transportFailure = state.transportFailure;
+  let jobOutput = state.jobOutput;
 
   switch (evidence.kind) {
     case "launch-requested":
@@ -182,7 +191,7 @@ export function reduceAgentRunEvidence(
       execution = { status: evidence.willRetry ? "active" : "settling" };
       break;
     case "agent-settled":
-      execution = { status: "settled" };
+      if (state.completionMode === "pi-handshake") execution = { status: "settled" };
       break;
     case "completion-requested":
       if (completionIntent?.reason !== "agent-error") {
@@ -219,6 +228,12 @@ export function reduceAgentRunEvidence(
     case "transport-failed":
       transportFailure = { message: evidence.message };
       break;
+    case "request-timeout":
+      transportFailure = { message: `Host request '${evidence.operation}' timed out after ${evidence.timeoutMs}ms; process state is unknown` };
+      break;
+    case "job-output-captured":
+      if (state.completionMode === "native-job" && typeof evidence.output === "string" && jobOutput === null) jobOutput = evidence.output;
+      break;
   }
 
   return deepFreeze({
@@ -230,6 +245,7 @@ export function reduceAgentRunEvidence(
     startFailure,
     control,
     transportFailure,
+    jobOutput,
     lastSequenceBySource: {
       ...state.lastSequenceBySource,
       [evidence.sourceId]: evidence.sequence,
@@ -270,7 +286,9 @@ export function projectAgentRunStatus(state: AgentRunState): AgentRunProjectedSt
     const normalExit = state.process.exit?.kind === "native"
       ? state.process.exit.code === 0 && state.process.exit.signal === null
       : state.process.exit?.kind === "shell" && state.process.exit.shellStatus === 0;
-    const gracefulHandshake = state.completionIntent !== null && state.execution.status === "settled";
+    const gracefulHandshake = state.completionMode === "native-job"
+      ? state.jobOutput !== null
+      : state.completionIntent !== null && state.execution.status === "settled";
     if (!normalExit || !gracefulHandshake) {
       return { status: "abnormal", disposition: "abnormal-exit", terminal: true, taskOutcome: "unknown" };
     }
@@ -338,7 +356,8 @@ export function projectAgentRunCompletion(
   return deepFreeze({
     runId: state.runId,
     execution,
-    output: input.output,
+    output: state.completionMode === "native-job" ? state.jobOutput ?? "" : input.output,
+    ...(projected.disposition === "completed" && state.completionMode === "native-job" ? { completionEvidence: "native-job-exit-output" as const } : {}),
     taskOutcome: "unknown",
     settled: state.execution.status === "settled",
     ...(state.process.status === "exited" && state.process.exit !== undefined
