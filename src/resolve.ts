@@ -1,4 +1,4 @@
-import { bindNativeMcp, requireTrustedNativeOrigin, type DefinitionOrigin, type NativeBindingContext, type AgentRunner, type NormalizedAgentDefinition, type SystemPrompt, type ThinkingLevel } from "./definitions.js";
+import { bindNativeMcp, requireTrustedNativeOrigin, type DefinitionOrigin, type NativeRuntimeContext, type NativeScopeBindings, type AgentRunner, type NormalizedAgentDefinition, type SystemPrompt, type ThinkingLevel } from "./definitions.js";
 import { deepFreeze, isThinkingLevel } from "./internal.js";
 
 export type AgentLaunchOverrides = Readonly<{
@@ -35,7 +35,7 @@ export function resolveAgentLaunchIntent(
   callerCwd: string,
   overrides: AgentLaunchOverrides = {},
 ): AgentLaunchIntent {
-  if (definition.metadata.cli !== undefined) throw new TypeError("Legacy CLI review metadata requires its separate consumer route");
+  if (definition.metadata.cli !== undefined && definition.metadata.cli !== "pi") throw new TypeError("Legacy CLI review metadata requires its separate consumer route");
   const runner = definition.runner ?? "pi";
   if (runner !== "pi" && runner !== "copilot") throw new TypeError("Unknown runner");
   if (runner === "copilot") {
@@ -92,9 +92,20 @@ export type ManagedNativeSessionRecord = Readonly<{
   reference: NativeSessionReference;
   definitionOrigin: DefinitionOrigin;
   definitionSha256: string;
-  bindings: NativeBindingContext;
+  bindings: NativeScopeBindings;
   skills: readonly NativeSkillSnapshot[];
 }>;
+function validLiteral(value: unknown): value is string {
+  return typeof value === "string" && Boolean(value.trim()) && !value.includes("\0");
+}
+
+function validateSkillSnapshots(skills: unknown): asserts skills is readonly NativeSkillSnapshot[] {
+  if (!Array.isArray(skills) || skills.some((skill) => !skill || !validLiteral(skill.name) ||
+      typeof skill.body !== "string" || !validLiteral(skill.baseDir) || !skill.baseDir.startsWith("/"))) {
+    throw new TypeError("Invalid trusted skill snapshots");
+  }
+}
+
 export type ManagedNativeResumeInput = Readonly<{ managedSessionId: string; agent?: string; message?: string; autoExit?: true }>;
 
 // The host must load/hash the definition from trusted discovery. A snapshot is
@@ -103,7 +114,7 @@ export function resolveManagedNativeResume(
   input: unknown,
   callerSessionId: string,
   records: readonly ManagedNativeSessionRecord[],
-  trusted: Readonly<{ definition: NormalizedAgentDefinition; sha256: string; skills?: readonly NativeSkillSnapshot[] }>,
+  trusted: Readonly<{ definition: NormalizedAgentDefinition; sha256: string; runtime: NativeRuntimeContext; skills?: readonly NativeSkillSnapshot[] }>,
 ) {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new TypeError("Invalid managed resume input");
   const fields = input as Record<string, unknown>;
@@ -112,28 +123,58 @@ export function resolveManagedNativeResume(
       (fields.agent !== undefined && (typeof fields.agent !== "string" || !fields.agent.trim())) ||
       (fields.message !== undefined && typeof fields.message !== "string") ||
       (fields.autoExit !== undefined && fields.autoExit !== true)) throw new TypeError("Native resume accepts managed ID, optional trusted agent/message and autoExit:true only");
-  const matches = records.filter((record) => record.callerSessionId === callerSessionId && record.reference.managedSessionId === fields.managedSessionId);
+  if (!validLiteral(callerSessionId)) throw new TypeError("Invalid caller identity");
+  const matches = records.filter((record) => record?.callerSessionId === callerSessionId && record.reference?.managedSessionId === fields.managedSessionId);
   if (matches.length !== 1) throw new TypeError("Unknown or ambiguous caller-bound managed native session");
   const record = matches[0];
   requireTrustedNativeOrigin(record.definitionOrigin);
   requireTrustedNativeOrigin(trusted.definition.origin);
-  if (record.reference.runner !== "copilot" || record.reference.selector.kind !== "name" || !record.reference.selector.value.trim() ||
+  if (record.reference.runner !== "copilot" || record.reference.selector?.kind !== "name" || !validLiteral(record.reference.selector.value) ||
+      !validLiteral(record.reference.cwd) || !record.reference.cwd.startsWith("/") ||
       trusted.definition.runner !== "copilot" || !trusted.definition.native ||
-      record.bindings.managedSessionId !== record.reference.managedSessionId) throw new TypeError("Invalid native session record or runner");
+      !record.bindings || record.bindings.managedSessionId !== record.reference.managedSessionId) throw new TypeError("Invalid native session record or runner");
+  validateSkillSnapshots(record.skills);
+  // Copy only captured scope data. Runtime values from records are never read,
+  // spread into command context, or returned as if they were trusted policy.
+  const bindings: NativeScopeBindings = {
+    parentCwd: record.bindings.parentCwd,
+    managedSessionId: record.bindings.managedSessionId,
+    todoPathLiteral: record.bindings.todoPathLiteral,
+  };
+  if (!trusted.runtime) throw new TypeError("Missing current trusted native runtime");
+  const mcp = bindNativeMcp(trusted.definition.native, {
+    ...bindings,
+    home: trusted.runtime.home,
+    node: trusted.runtime.node,
+  });
   if (!/^[a-f0-9]{64}$/.test(trusted.sha256) || !/^[a-f0-9]{64}$/.test(record.definitionSha256)) throw new TypeError("Missing verified definition hash");
   if (fields.agent === undefined) {
     if (trusted.sha256 !== record.definitionSha256 || trusted.definition.origin!.kind !== record.definitionOrigin.kind ||
         trusted.definition.origin!.canonicalPath !== record.definitionOrigin.canonicalPath ||
         trusted.definition.origin!.canonicalRoot !== record.definitionOrigin.canonicalRoot) throw new TypeError("Native definition changed; select an explicit trusted profile");
-  } else if (fields.agent !== trusted.definition.name) throw new TypeError("Trusted profile selection mismatch");
-  const intent = resolveAgentLaunchIntent(trusted.definition, typeof fields.message === "string" ? fields.message : "", record.reference.cwd, { cwd: record.reference.cwd });
+  } else {
+    if (fields.agent !== trusted.definition.name) throw new TypeError("Trusted profile selection mismatch");
+    validateSkillSnapshots(trusted.skills);
+    const names = trusted.definition.skills ?? [];
+    if (trusted.skills!.length !== names.length || trusted.skills!.some((skill, index) => skill.name !== names[index])) {
+      throw new TypeError("Trusted profile skill snapshots must match declared skills in order");
+    }
+  }
+  const reference: NativeSessionReference = {
+    runner: "copilot",
+    selector: { kind: "name", value: record.reference.selector.value },
+    managedSessionId: record.reference.managedSessionId,
+    cwd: record.reference.cwd,
+  };
+  const skills = (fields.agent === undefined ? record.skills : trusted.skills!).map(({ name, body, baseDir }) => ({ name, body, baseDir }));
+  const intent = resolveAgentLaunchIntent(trusted.definition, typeof fields.message === "string" ? fields.message : "", reference.cwd, { cwd: reference.cwd });
   return deepFreeze(structuredClone({
-    reference: record.reference,
+    reference,
     definition: intent.definition,
     definitionSha256: trusted.sha256,
-    bindings: record.bindings,
-    skills: fields.agent === undefined ? record.skills : trusted.skills ?? [],
-    mcp: bindNativeMcp(trusted.definition.native, record.bindings),
+    bindings,
+    skills,
+    mcp,
     intent,
   }));
 }

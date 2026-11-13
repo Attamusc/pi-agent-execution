@@ -38,6 +38,8 @@ export type AgentRunEvidence =
   | Evidence<"request-timeout", { operation: string; timeoutMs: number }>
   | Evidence<"job-output-captured", { output: string }>;
 
+export type AgentRequestTimeout = Readonly<{ operation: string; timeoutMs: number }>;
+
 export type AgentRunState = Readonly<{
   runId: string;
   completionMode: "pi-handshake" | "native-job";
@@ -62,6 +64,7 @@ export type AgentRunState = Readonly<{
     | Readonly<{ status: "terminate-requested"; mode: TerminationMode }>
     | Readonly<{ status: "timed-out"; timeoutMs: number }>;
   transportFailure: Readonly<{ message: string }> | null;
+  requestTimeout: AgentRequestTimeout | null;
   lastSequenceBySource: Readonly<Record<string, number>>;
 }>;
 
@@ -74,7 +77,8 @@ export type AgentRunDisposition =
   | "interrupted"
   | "terminated"
   | "agent-error"
-  | "transport-failed";
+  | "transport-failed"
+  | "request-timeout";
 
 export type AgentRunUsage = Readonly<{
   inputTokens?: number;
@@ -91,6 +95,7 @@ export type AgentRunCompletion = Readonly<{
   output: string;
   taskOutcome: "unknown";
   settled: boolean;
+  requestTimeout?: AgentRequestTimeout;
   completionEvidence?: "native-job-exit-output";
   processExit?: AgentProcessExit;
   sessionRef?: string;
@@ -138,6 +143,7 @@ export function createAgentRunState(runId: string, completionMode: "pi-handshake
     startFailure: null,
     control: { status: "none" },
     transportFailure: null,
+    requestTimeout: null,
     lastSequenceBySource: {},
   });
 }
@@ -159,6 +165,7 @@ export function reduceAgentRunEvidence(
   let control = state.control;
   let transportFailure = state.transportFailure;
   let jobOutput = state.jobOutput;
+  let requestTimeout = state.requestTimeout;
 
   switch (evidence.kind) {
     case "launch-requested":
@@ -229,7 +236,7 @@ export function reduceAgentRunEvidence(
       transportFailure = { message: evidence.message };
       break;
     case "request-timeout":
-      transportFailure = { message: `Host request '${evidence.operation}' timed out after ${evidence.timeoutMs}ms; process state is unknown` };
+      requestTimeout = { operation: evidence.operation, timeoutMs: evidence.timeoutMs };
       break;
     case "job-output-captured":
       if (state.completionMode === "native-job" && typeof evidence.output === "string" && jobOutput === null) jobOutput = evidence.output;
@@ -246,6 +253,7 @@ export function reduceAgentRunEvidence(
     control,
     transportFailure,
     jobOutput,
+    requestTimeout,
     lastSequenceBySource: {
       ...state.lastSequenceBySource,
       [evidence.sourceId]: evidence.sequence,
@@ -293,6 +301,9 @@ export function projectAgentRunStatus(state: AgentRunState): AgentRunProjectedSt
       return { status: "abnormal", disposition: "abnormal-exit", terminal: true, taskOutcome: "unknown" };
     }
     return { status: "completed", disposition: "completed", terminal: true, taskOutcome: "unknown" };
+  }
+  if (state.requestTimeout) {
+    return { status: "failed", disposition: "request-timeout", terminal: false, taskOutcome: "unknown" };
   }
   if (state.control.status === "interrupted") {
     return { status: "interrupted", disposition: "interrupted", terminal: false, taskOutcome: "unknown" };
@@ -360,6 +371,7 @@ export function projectAgentRunCompletion(
     ...(projected.disposition === "completed" && state.completionMode === "native-job" ? { completionEvidence: "native-job-exit-output" as const } : {}),
     taskOutcome: "unknown",
     settled: state.execution.status === "settled",
+    ...(state.requestTimeout === null ? {} : { requestTimeout: state.requestTimeout }),
     ...(state.process.status === "exited" && state.process.exit !== undefined
       ? { processExit: structuredClone(state.process.exit) }
       : {}),

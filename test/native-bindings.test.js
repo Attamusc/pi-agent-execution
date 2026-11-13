@@ -17,8 +17,8 @@ test("MCP expansion is one-pass literal substitution, never ambient env or shell
 test("native resume accepts caller-bound managed ID only and re-resolves hashed policy", () => {
   assert.equal(typeof api.resolveManagedNativeResume, "function");
   const sha256 = "a".repeat(64);
-  const record = { callerSessionId: "parent", reference: { runner: "copilot", selector: { kind: "name", value: "unique-native-name" }, managedSessionId: "managed-1", cwd: "/job" }, definitionOrigin: origin, definitionSha256: sha256, bindings: context, skills: [{ name: "tdd", body: "frozen skill bytes", baseDir: "/skills/tdd" }] };
-  const trusted = { definition, sha256 };
+  const record = { callerSessionId: "parent", reference: { runner: "copilot", selector: { kind: "name", value: "unique-native-name" }, managedSessionId: "managed-1", cwd: "/job" }, definitionOrigin: origin, definitionSha256: sha256, bindings: { parentCwd: context.parentCwd, managedSessionId: context.managedSessionId, todoPathLiteral: context.todoPathLiteral }, skills: [{ name: "tdd", body: "frozen skill bytes", baseDir: "/skills/tdd" }] };
+  const trusted = { definition, sha256, runtime: { home: context.home, node: context.node }, skills: [] };
   const resume = (input, caller = "parent", resolved = trusted) => api.resolveManagedNativeResume(input, caller, [record], resolved);
   const result = resume({ managedSessionId: "managed-1", message: "Continue" });
   assert.equal(result.reference.selector.value, "unique-native-name");

@@ -271,15 +271,21 @@ export function selectAgentDefinition(candidates: readonly NormalizedAgentDefini
   return candidates[candidates.length - 1];
 }
 
-export type NativeBindingContext = Readonly<{
-  home: string;
-  node: string;
+export type NativeRuntimeContext = Readonly<{ home: string; node: string }>;
+export type NativeScopeBindings = Readonly<{
   parentCwd: string;
   managedSessionId: string;
   todoPathLiteral: string;
 }>;
+export type NativeBindingContext = NativeRuntimeContext & NativeScopeBindings;
 
 export function bindNativeMcp(policy: NativeAgentPolicy, context: NativeBindingContext): Readonly<Record<string, NativeMcpServer>> {
+  for (const key of ["home", "node", "parentCwd", "managedSessionId", "todoPathLiteral"] as const) {
+    const value = context[key];
+    if (typeof value !== "string" || value.includes("\0") || (key !== "todoPathLiteral" && !value.trim())) {
+      throw new TypeError(`Invalid native binding '${key}'`);
+    }
+  }
   const values: Record<string, string> = { home: context.home, node: context.node, parentCwd: context.parentCwd, managedSessionId: context.managedSessionId, "env.PI_TODO_PATH": context.todoPathLiteral };
   const expand = (value: string): string => {
     validateNativeTemplate(value);
