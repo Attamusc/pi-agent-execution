@@ -16,7 +16,7 @@ export type AgentDefinitionPolicy = Readonly<{
   requiredFields: readonly ("name" | "description")[];
 }>;
 
-export type AgentRunner = "pi" | "copilot";
+export type AgentRunner = "pi" | "copilot" | "claude";
 
 // Supplied by host discovery, never taken from frontmatter. Paths must already
 // have been canonicalized by that host; this library performs no filesystem IO.
@@ -29,6 +29,8 @@ export type DefinitionOrigin = Readonly<{
 export type NativeMcpServer = Readonly<{ command: string; args: readonly string[]; env?: Readonly<Record<string, string>> }>;
 export type NativeAgentPolicy = Readonly<{
   runnerVersion: string;
+  nativeTools?: readonly string[];
+  permissionMode?: "manual" | "dontAsk" | "plan";
   workspaceTrust: "existing" | "session";
   allow: readonly string[];
   deny: readonly string[];
@@ -180,7 +182,7 @@ export function parseAgentDefinition(
   return { ok: true, definition, diagnostics };
 }
 
-const nativeKeys = new Set(["runner", "runner-version", "workspace-trust", "native-allow", "native-deny", "mcp"]);
+const nativeKeys = new Set(["runner", "runner-version", "workspace-trust", "native-allow", "native-deny", "native-tools", "permission-mode", "mcp"]);
 
 function canonicalAbsolute(value: string): boolean {
   return value.startsWith("/") && !value.includes("\\") && !value.includes("\0") &&
@@ -214,23 +216,34 @@ function strings(value: unknown, field: string): readonly string[] {
 function parseRunnerPolicy(values: Record<string, unknown>, origin?: DefinitionOrigin): Pick<NormalizedAgentDefinition, "runner" | "origin" | "native"> {
   if (origin !== undefined) validateDefinitionOrigin(origin);
   const runner = values.runner;
-  if (runner !== undefined && runner !== "pi" && runner !== "copilot") throw new TypeError(`Unknown runner '${String(runner)}'`);
+  if (runner !== undefined && runner !== "pi" && runner !== "copilot" && runner !== "claude") throw new TypeError(`Unknown runner '${String(runner)}'`);
   const privileged = [...nativeKeys].some((key) => key !== "runner" && Object.hasOwn(values, key));
-  if (privileged && runner !== "copilot") throw new TypeError("Native policy requires runner: copilot");
-  if (runner !== "copilot") return { ...(runner === undefined ? {} : { runner }), ...(origin === undefined ? {} : { origin: structuredClone(origin) }) };
+  if (privileged && runner !== "copilot" && runner !== "claude") throw new TypeError("Native policy requires runner: copilot or claude");
+  if (runner !== "copilot" && runner !== "claude") return { ...(runner === undefined ? {} : { runner }), ...(origin === undefined ? {} : { origin: structuredClone(origin) }) };
   requireTrustedNativeOrigin(origin);
   if (values["auto-exit"] !== true || values.interactive !== false ||
       (values["session-mode"] !== undefined && values["session-mode"] !== "new")) {
-    throw new TypeError("Copilot requires auto-exit: true, interactive: false and no fork/retained session mode");
+    throw new TypeError(`${runner} requires auto-exit: true, interactive: false and no fork/retained session mode`);
   }
   for (const field of ["tools", "deny-tools", "provider", "cli", "command", "args", "argv"]) {
-    if (Object.hasOwn(values, field)) throw new TypeError(`Copilot does not support '${field}' overrides`);
+    if (Object.hasOwn(values, field)) throw new TypeError(`${runner} does not support '${field}' overrides`);
   }
   if (typeof values["runner-version"] !== "string" || !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(values["runner-version"])) {
-    throw new TypeError("Copilot requires a pinned runner-version");
+    throw new TypeError(`${runner} requires a pinned runner-version`);
   }
   const workspaceTrust = values["workspace-trust"];
   if (workspaceTrust !== "existing" && workspaceTrust !== "session") throw new TypeError("Invalid workspace-trust");
+  let claudePolicy: Pick<NativeAgentPolicy, "nativeTools" | "permissionMode"> = {};
+  if (runner === "claude") {
+    if (workspaceTrust !== "existing") throw new TypeError("Claude requires existing workspace trust verified by the host before noninteractive launch");
+    const nativeTools = strings(values["native-tools"], "native-tools");
+    if (nativeTools.some((tool) => !/^[A-Za-z][A-Za-z0-9]*$/.test(tool))) throw new TypeError("native-tools must contain explicit built-in tool names");
+    const permissionMode = values["permission-mode"];
+    if (permissionMode !== "manual" && permissionMode !== "dontAsk" && permissionMode !== "plan") throw new TypeError("Claude requires permission-mode: manual, dontAsk or plan");
+    claudePolicy = { nativeTools, permissionMode };
+  } else if (Object.hasOwn(values, "native-tools") || Object.hasOwn(values, "permission-mode")) {
+    throw new TypeError("Claude policy fields require runner: claude");
+  }
   const allow = strings(values["native-allow"], "native-allow");
   const deny = strings(values["native-deny"] ?? [], "native-deny");
   if (!record(values.mcp ?? {})) throw new TypeError("mcp must be a mapping");
@@ -243,7 +256,7 @@ function parseRunnerPolicy(values: Record<string, unknown>, origin?: DefinitionO
     for (const value of [server.command, ...args, ...Object.values(server.env ?? {})]) validateNativeTemplate(value as string);
     Object.defineProperty(mcp, name, { value: { command: server.command, args, ...(server.env === undefined ? {} : { env: server.env }) }, enumerable: true });
   }
-  return { runner, origin: structuredClone(origin!), native: structuredClone({ runnerVersion: values["runner-version"], workspaceTrust, allow, deny, mcp }) as NativeAgentPolicy };
+  return { runner, origin: structuredClone(origin!), native: structuredClone({ runnerVersion: values["runner-version"], workspaceTrust, allow, deny, mcp, ...claudePolicy }) as NativeAgentPolicy };
 }
 
 const substitutions = new Set(["home", "node", "parentCwd", "managedSessionId", "env.PI_TODO_PATH"]);
@@ -263,9 +276,9 @@ export function selectAgentDefinition(candidates: readonly NormalizedAgentDefini
   if (new Set(candidates.map((candidate) => candidate.name)).size !== 1) throw new TypeError("Definition candidates must have the same name");
   for (const candidate of candidates) {
     if (candidate.origin) validateDefinitionOrigin(candidate.origin);
-    if (candidate.runner === "copilot" || candidate.native) requireTrustedNativeOrigin(candidate.origin);
+    if (candidate.runner === "copilot" || candidate.runner === "claude" || candidate.native) requireTrustedNativeOrigin(candidate.origin);
   }
-  if (candidates.some((candidate) => candidate.runner === "copilot") && candidates.some((candidate) => candidate.origin?.kind === "project" || !candidate.origin)) {
+  if (candidates.some((candidate) => candidate.runner === "copilot" || candidate.runner === "claude") && candidates.some((candidate) => candidate.origin?.kind === "project" || !candidate.origin)) {
     throw new TypeError("Project or unprovenanced shadow of a trusted native role is forbidden");
   }
   return candidates[candidates.length - 1];

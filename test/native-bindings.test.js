@@ -14,6 +14,22 @@ test("MCP expansion is one-pass literal substitution, never ambient env or shell
   }
 });
 
+test("Claude resume retains a UUID and rejects cross-runner profile transitions", () => {
+  const claude = { ...definition, runner: "claude", native: { ...definition.native, workspaceTrust: "existing", nativeTools: ["Read"], permissionMode: "dontAsk" } };
+  const sha256 = "a".repeat(64);
+  const reference = { runner: "claude", selector: { kind: "uuid", value: "12345678-1234-4234-8234-123456789abc" }, managedSessionId: "managed-1", cwd: "/job" };
+  const record = { callerSessionId: "parent", reference, definitionOrigin: origin, definitionSha256: sha256, bindings: context, skills: [] };
+  const trusted = { definition: claude, sha256, runtime: context, skills: [] };
+  const resume = (saved = record, profile = trusted, input = { managedSessionId: "managed-1" }) => api.resolveManagedNativeResume(input, "parent", [saved], profile);
+  assert.deepEqual(resume().reference, reference);
+  assert.equal(resume().intent.runner, "claude");
+  assert.equal(resume(record, trusted, { managedSessionId: "managed-1", agent: "w" }).reference.selector.kind, "uuid");
+  for (const selector of [{ kind: "name", value: reference.selector.value }, { kind: "uuid", value: "not-a-uuid" }]) {
+    assert.throws(() => resume({ ...record, reference: { ...reference, selector } }), /record|runner/);
+  }
+  assert.throws(() => resume(record, { ...trusted, definition }, { managedSessionId: "managed-1", agent: "w" }), /runner/);
+});
+
 test("native resume accepts caller-bound managed ID only and re-resolves hashed policy", () => {
   assert.equal(typeof api.resolveManagedNativeResume, "function");
   const sha256 = "a".repeat(64);

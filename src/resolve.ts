@@ -37,12 +37,15 @@ export function resolveAgentLaunchIntent(
 ): AgentLaunchIntent {
   if (definition.metadata.cli !== undefined && definition.metadata.cli !== "pi") throw new TypeError("Legacy CLI review metadata requires its separate consumer route");
   const runner = definition.runner ?? "pi";
-  if (runner !== "pi" && runner !== "copilot") throw new TypeError("Unknown runner");
-  if (runner === "copilot") {
+  if (runner !== "pi" && runner !== "copilot" && runner !== "claude") throw new TypeError("Unknown runner");
+  if (runner === "copilot" || runner === "claude") {
     requireTrustedNativeOrigin(definition.origin);
     if (!definition.native) throw new TypeError("Missing native policy");
-    if (overrides.tools !== undefined || definition.tools !== undefined) throw new TypeError("Copilot does not support Pi tools");
-    if (definition.metadata.interactive !== false || definition.metadata["auto-exit"] !== true) throw new TypeError("Copilot requires auto-exit job mode");
+    if (overrides.tools !== undefined || definition.tools !== undefined) throw new TypeError(`${runner} does not support Pi tools`);
+    if (definition.metadata.interactive !== false || definition.metadata["auto-exit"] !== true) throw new TypeError(`${runner} requires auto-exit job mode`);
+    if (runner === "claude" && (definition.native.workspaceTrust !== "existing" ||
+        !Array.isArray(definition.native.nativeTools) || definition.native.nativeTools.some((tool) => !/^[A-Za-z][A-Za-z0-9]*$/.test(tool)) ||
+        !["manual", "dontAsk", "plan"].includes(definition.native.permissionMode ?? ""))) throw new TypeError("Invalid Claude native policy");
   } else if (definition.native) throw new TypeError("Native policy conflicts with Pi runner");
   const explicitThinking = nonblank(overrides.thinking);
   if (explicitThinking !== undefined && !isThinkingLevel(explicitThinking)) {
@@ -80,11 +83,19 @@ export function resolveAgentLaunchIntent(
 }
 
 export type NativeSessionReference = Readonly<{
-  runner: "copilot";
-  selector: Readonly<{ kind: "name"; value: string }>;
   managedSessionId: string;
   cwd: string;
-}>;
+} & (
+  | { runner: "copilot"; selector: Readonly<{ kind: "name"; value: string }> }
+  | { runner: "claude"; selector: Readonly<{ kind: "uuid"; value: string }> }
+)>;
+
+function validNativeSelector(reference: NativeSessionReference): boolean {
+  return reference.runner === "copilot"
+    ? reference.selector?.kind === "name" && validLiteral(reference.selector.value)
+    : reference.runner === "claude" && reference.selector?.kind === "uuid" &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(reference.selector.value);
+}
 
 export type NativeSkillSnapshot = Readonly<{ name: string; body: string; baseDir: string }>;
 export type ManagedNativeSessionRecord = Readonly<{
@@ -129,9 +140,9 @@ export function resolveManagedNativeResume(
   const record = matches[0];
   requireTrustedNativeOrigin(record.definitionOrigin);
   requireTrustedNativeOrigin(trusted.definition.origin);
-  if (record.reference.runner !== "copilot" || record.reference.selector?.kind !== "name" || !validLiteral(record.reference.selector.value) ||
+  if (!validNativeSelector(record.reference) ||
       !validLiteral(record.reference.cwd) || !record.reference.cwd.startsWith("/") ||
-      trusted.definition.runner !== "copilot" || !trusted.definition.native ||
+      trusted.definition.runner !== record.reference.runner || !trusted.definition.native ||
       !record.bindings || record.bindings.managedSessionId !== record.reference.managedSessionId) throw new TypeError("Invalid native session record or runner");
   validateSkillSnapshots(record.skills);
   // Copy only captured scope data. Runtime values from records are never read,
@@ -161,8 +172,9 @@ export function resolveManagedNativeResume(
     }
   }
   const reference: NativeSessionReference = {
-    runner: "copilot",
-    selector: { kind: "name", value: record.reference.selector.value },
+    ...(record.reference.runner === "claude"
+      ? { runner: "claude" as const, selector: { kind: "uuid" as const, value: record.reference.selector.value } }
+      : { runner: "copilot" as const, selector: { kind: "name" as const, value: record.reference.selector.value } }),
     managedSessionId: record.reference.managedSessionId,
     cwd: record.reference.cwd,
   };

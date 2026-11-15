@@ -6,7 +6,7 @@ export type AgentRunCapabilities = Readonly<{
   interrupt: "process-abort" | "turn-escape";
   termination: "process-signal" | "herdr-pane-close" | "core-terminal-kill";
   timeout: "process-deadline" | "unsupported";
-  resume: "unsupported" | "pi-session-file" | "managed-native-name";
+  resume: "unsupported" | "pi-session-file" | "managed-native-name" | "managed-native-uuid";
   fork: "unsupported" | "seeded-pi-session";
   interaction: "none" | "user-takeover";
 }>;
@@ -49,6 +49,11 @@ export const copilotJobCapabilities = {
   resume: "managed-native-name",
   fork: "unsupported",
   interaction: "none",
+} as const satisfies AgentRunCapabilities;
+
+export const claudeJobCapabilities = {
+  ...copilotJobCapabilities,
+  resume: "managed-native-uuid",
 } as const satisfies AgentRunCapabilities;
 
 export class UnsupportedAgentRunCapability extends Error {

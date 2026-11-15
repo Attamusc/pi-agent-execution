@@ -7,6 +7,30 @@ const parse = (yaml, provenance = origin) => api.parseAgentDefinition({ path: "/
 
 const nativeYaml = `runner: copilot\nrunner-version: 1.0.106-3\nauto-exit: true\ninteractive: false\nworkspace-trust: session\nnative-allow: [write, shell, "tasks(todo)"]\nnative-deny: []\nmcp:\n  tasks:\n    command: "{node}"\n    args: ["--scope-cwd", "{parentCwd}", "--store-override={env.PI_TODO_PATH}"]`;
 
+const claudeYaml = nativeYaml.replace("runner: copilot", "runner: claude").replace("1.0.106-3", "2.1.325").replace("workspace-trust: session", "workspace-trust: existing") + '\nnative-tools: [Read, Edit, Bash]\npermission-mode: dontAsk';
+
+test("Claude policy requires explicit tools, bounded permissions and existing trust", () => {
+  const result = parse(claudeYaml);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.definition.native.nativeTools, ["Read", "Edit", "Bash"]);
+  assert.equal(result.definition.native.permissionMode, "dontAsk");
+  assert.equal(result.definition.metadata["native-tools"], undefined);
+  assert.equal(api.resolveAgentLaunchIntent(result.definition, "Task", "/caller").runner, "claude");
+  for (const yaml of [
+    claudeYaml.replace("workspace-trust: existing", "workspace-trust: session"),
+    claudeYaml.replace("permission-mode: dontAsk", "permission-mode: bypassPermissions"),
+    claudeYaml.replace("\nnative-tools: [Read, Edit, Bash]", ""),
+    claudeYaml.replace("[Read, Edit, Bash]", '["*"]'),
+    claudeYaml + "\ncli: claude",
+    nativeYaml + "\npermission-mode: manual",
+  ]) assert.equal(parse(yaml).ok, false, yaml);
+  assert.equal(parse(claudeYaml, { kind: "project", canonicalPath: "/project/worker.md", canonicalRoot: "/project" }).ok, false);
+  const project = parse("description: shadow").definition;
+  assert.throws(() => api.selectAgentDefinition([result.definition, { ...project, origin: undefined }]), /shadow/i);
+  assert.throws(() => api.resolveAgentLaunchIntent(result.definition, "Task", "/caller", { tools: ["read"] }), /Pi tools/);
+  assert.equal(api.claudeJobCapabilities.resume, "managed-native-uuid");
+});
+
 test("trusted native policy is normalized separately from metadata and model overrides", () => {
   const result = parse(nativeYaml);
   assert.equal(result.ok, true);

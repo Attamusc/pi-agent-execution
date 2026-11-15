@@ -137,9 +137,9 @@ Existing Pi definition shapes, metadata, prompt/output semantics and capability 
 
 This is not frontmatter. Discovery must establish origin independently, canonicalize both paths (including symlinks), and supply a caller-configured trusted root. The passive library checks absolute canonical spelling and root containment; it cannot detect a host lying about realpaths or classify filesystem resources itself. Frontmatter `origin` remains untrusted metadata. Missing provenance never enables native execution. Hosts must reject discovery/parse errors, not remove the failed candidate and retry a lower-priority source.
 
-`selectAgentDefinition(candidates)` accepts same-name definitions in host-defined low-to-high precedence order, returns one whole definition, and never merges content or grants. Any project or unprovenanced shadow of a trusted Copilot role fails even when the shadow omits `runner`. Ordinary Pi precedence remains last-candidate-wins. Consumers must collect *all* same-name candidates before selection; passing only an already-selected project winner defeats shadow detection.
+`selectAgentDefinition(candidates)` accepts same-name definitions in host-defined low-to-high precedence order, returns one whole definition, and never merges content or grants. Any project or unprovenanced shadow of a trusted Copilot or Claude role fails even when the shadow omits `runner`. Ordinary Pi precedence remains last-candidate-wins. Consumers must collect *all* same-name candidates before selection; passing only an already-selected project winner defeats shadow detection.
 
-Only global-user and installed-package definitions can declare `runner: copilot` or native policy. Supported fields:
+Only global-user and installed-package definitions can declare `runner: copilot`, `runner: claude` or native policy. Supported fields:
 
 ```yaml
 runner: copilot
@@ -162,9 +162,30 @@ The native policy is normalized as `definition.native` with `runnerVersion`, `wo
 
 `bindNativeMcp(policy, context)` substitutes only `{home}`, `{node}`, `{parentCwd}`, `{managedSessionId}` and `{env.PI_TODO_PATH}`. Context supplies these as `home`, `node`, `parentCwd`, `managedSessionId`, `todoPathLiteral`. All five must be strings without NUL; only `todoPathLiteral` may be blank, even when a template does not reference the other fields. The Pi host captures its override once; `todoPathLiteral` must be the captured value or `""` when absent. Unknown/malformed placeholders fail. Replacement is one-pass: braces, shell syntax and whitespace inside captured values stay literal. The helper does not read environment variables, evaluate shell, spawn anything, or split argv. Hosts must pass command/args directly to their native API, never through an interpolated shell command.
 
+### Claude Code policy
+
+Claude native jobs use the same trusted-origin, explicit grants, MCP bindings and auto-exit restrictions, with these runner-specific fields:
+
+```yaml
+runner: claude
+runner-version: 2.1.325
+auto-exit: true
+interactive: false
+workspace-trust: existing
+native-tools: [Read, Edit, Bash]
+permission-mode: dontAsk
+native-allow: [Read, Edit, "Bash(git status)"]
+native-deny: []
+mcp: {}
+```
+
+`native-tools` normalizes to `native.nativeTools`; it must be an explicit array of built-in tool names (empty disables built-ins). The host must validate availability against the pinned CLI, pass an explicit `--tools` set and pass `allow`/`deny` as Claude permission rules, not Copilot grants. `permission-mode` normalizes to `native.permissionMode` and accepts only `manual`, `dontAsk` or `plan`, never bypass. These two fields are rejected for other runners. Hosts must use empty setting sources and strict MCP configuration; the parser does not launch or enforce CLI restrictions. Public thinking values still require runner-specific validation/mapping by the host.
+
+Claude requires `workspace-trust: existing`. This is a host precondition, **not proof of trust**: noninteractive `-p` skips the native trust dialog. Hosts must independently verify existing native workspace trust before launching and fail closed if they cannot establish it. Never accept a trust prompt implicitly or treat the YAML field as consent. Native `runner: claude` is separate from legacy `cli: claude` review seats.
+
 ### Caller-bound resume
 
-`NativeSessionReference` is `{runner:'copilot', selector:{kind:'name',value}, managedSessionId, cwd}`. The selector is the unique native conversation name, never a Core terminal ID. Each run has its own lifecycle runId/hostRef; persistent native context survives ephemeral job processes.
+`NativeSessionReference` is `{runner:'copilot', selector:{kind:'name',value}, managedSessionId, cwd}`. The selector is the unique native conversation name, never a Core terminal ID. Claude references instead use `{runner:'claude', selector:{kind:'uuid',value}, managedSessionId, cwd}` with a validated UUID for `--session-id` / `--resume`. Explicit profile transitions cannot switch runners. Each run has its own lifecycle runId/hostRef; persistent native context survives ephemeral job processes.
 
 `resolveManagedNativeResume(input, callerSessionId, records, trusted)` accepts model input containing only `managedSessionId`, optional `agent`, `message`, and `autoExit:true`. It rejects raw Pi session paths, snapshot paths, executable fields and unknown keys. Existing Pi file-resume remains a separate consumer API. `records` must come from the caller's own correlated launch/session records, not worker result sidecars; unknown/cross-caller/ambiguous IDs fail.
 
@@ -172,7 +193,7 @@ A `ManagedNativeSessionRecord` stores caller identity, native reference, `defini
 
 ### Natural completion and capabilities
 
-`copilotJobCapabilities` declares persistent session context, ephemeral processes, captured-output progress, managed-name resume, no fork/takeover, Core terminal kill and unsupported process-deadline timeout. A host request timeout is not a process deadline or proof of cancellation.
+`copilotJobCapabilities` declares persistent session context, ephemeral processes, captured-output progress, managed-name resume, no fork/takeover, Core terminal kill and unsupported process-deadline timeout. `claudeJobCapabilities` has the same lifecycle operations but declares `managed-native-uuid` resume. A host request timeout is not a process deadline or proof of cancellation.
 
 Use `createAgentRunState(runId, "native-job")` for native jobs; the default remains `"pi-handshake"`. Correlated `job-output-captured` evidence carries the host-captured bounded output (empty is valid; missing capture is not). Normal native completion requires both zero/no-signal process exit and captured output, without Pi settlement or completion intent. `agent-settled` cannot settle native state, and native output evidence cannot complete Pi state. Native completion returns `completionEvidence: "native-job-exit-output"`, `settled:false`, and `taskOutcome:"unknown"`; exit zero certifies invocation only. The completion output uses captured evidence, not an independently supplied string. Hosts own output collection, truncation policy and private full-output retention; this library never exports native history/config.
 

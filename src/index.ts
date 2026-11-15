@@ -2,6 +2,7 @@ export const contractVersion = 2 as const;
 
 export {
   copilotJobCapabilities,
+  claudeJobCapabilities,
   UnsupportedAgentRunCapability,
   requireCapability,
   visibleHerdrCapabilities,
