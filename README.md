@@ -123,7 +123,7 @@ The structural seam accepts current Pi `SessionMessageEntry`-shaped values or th
 
 ## Native job contracts (v2)
 
-Existing Pi definition shapes, metadata, prompt/output semantics and capability profiles remain unchanged. Resolved intents now explicitly carry `runner`, defaulting to `pi`. Explicit unknown runners fail, without fallback. Explicit `cli: pi` retains ordinary Pi resolution. Other legacy `cli` review metadata remains in the parser result for its separate consumer route; the shared launch resolver rejects it rather than silently constructing a Pi intent. Consumers must continue dispatching that existing route themselves.
+Normal Pi model, thinking, tools, skills, prompt/output semantics and capability profiles retain their behavior. Native policy keys such as `mcp`, `runner-version` and `workspace-trust` are reserved: using them on a Pi definition is rejected instead of preserving them as ordinary metadata. Resolved intents explicitly carry `runner`, defaulting to `pi`. Unknown runners fail without fallback, and explicit `cli: pi` retains ordinary Pi resolution. Other legacy `cli` metadata remains in the parser result, but the shared launch resolver rejects it rather than constructing a Pi intent. Hosts must reject unsupported transport intent before precedence or execution can turn it into a Pi fallback; this contract does not provide a foreign-CLI launcher.
 
 ### Trusted definitions and selection
 
