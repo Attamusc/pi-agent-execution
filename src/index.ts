@@ -1,6 +1,8 @@
-export const contractVersion = 1 as const;
+export const contractVersion = 2 as const;
 
 export {
+  copilotJobCapabilities,
+  claudeJobCapabilities,
   UnsupportedAgentRunCapability,
   requireCapability,
   visibleHerdrCapabilities,
@@ -11,6 +13,17 @@ export {
 
 export {
   parseAgentDefinition,
+  selectAgentDefinition,
+  validateDefinitionOrigin,
+  requireTrustedNativeOrigin,
+  bindNativeMcp,
+  type AgentRunner,
+  type DefinitionOrigin,
+  type NativeAgentPolicy,
+  type NativeMcpServer,
+  type NativeBindingContext,
+  type NativeRuntimeContext,
+  type NativeScopeBindings,
   type AgentDefinitionPolicy,
   type Diagnostic,
   type NormalizedAgentDefinition,
@@ -21,6 +34,11 @@ export {
 
 export {
   resolveAgentLaunchIntent,
+  resolveManagedNativeResume,
+  type NativeSessionReference,
+  type NativeSkillSnapshot,
+  type ManagedNativeSessionRecord,
+  type ManagedNativeResumeInput,
   type AgentLaunchIntent,
   type AgentLaunchOverrides,
 } from "./resolve.js";
@@ -31,6 +49,7 @@ export {
   projectAgentRunStatus,
   reduceAgentRunEvidence,
   type AgentProcessExit,
+  type AgentRequestTimeout,
   type AgentRunCompletion,
   type AgentRunCompletionInput,
   type AgentRunDisposition,

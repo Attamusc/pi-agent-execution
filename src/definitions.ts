@@ -16,10 +16,34 @@ export type AgentDefinitionPolicy = Readonly<{
   requiredFields: readonly ("name" | "description")[];
 }>;
 
+export type AgentRunner = "pi" | "copilot" | "claude";
+
+// Supplied by host discovery, never taken from frontmatter. Paths must already
+// have been canonicalized by that host; this library performs no filesystem IO.
+export type DefinitionOrigin = Readonly<{
+  kind: "global-user" | "installed-package" | "project";
+  canonicalPath: string;
+  canonicalRoot: string;
+}>;
+
+export type NativeMcpServer = Readonly<{ command: string; args: readonly string[]; env?: Readonly<Record<string, string>> }>;
+export type NativeAgentPolicy = Readonly<{
+  runnerVersion: string;
+  nativeTools?: readonly string[];
+  permissionMode?: "manual" | "dontAsk" | "plan";
+  workspaceTrust: "existing" | "session";
+  allow: readonly string[];
+  deny: readonly string[];
+  mcp: Readonly<Record<string, NativeMcpServer>>;
+}>;
+
 export type SystemPrompt = Readonly<{ mode?: "append" | "replace"; text: string }>;
 
 export type NormalizedAgentDefinition = Readonly<{
   name: string;
+  runner?: AgentRunner;
+  origin?: DefinitionOrigin;
+  native?: NativeAgentPolicy;
   description?: string;
   model?: string;
   thinking?: ThinkingLevel;
@@ -50,7 +74,7 @@ function commaList(value: string | undefined): readonly string[] | undefined {
 }
 
 export function parseAgentDefinition(
-  source: Readonly<{ path: string; content: string }>,
+  source: Readonly<{ path: string; content: string; origin?: DefinitionOrigin }>,
   policy: AgentDefinitionPolicy,
 ): ParseAgentDefinitionResult {
   const diagnostics: Diagnostic[] = [];
@@ -131,12 +155,19 @@ export function parseAgentDefinition(
     const value = field === "name" ? name : description;
     if (value === undefined) diagnostics.push({ path: source.path, field, message: `Required field '${field}' is missing` });
   }
+  let nativeFields: Pick<NormalizedAgentDefinition, "runner" | "origin" | "native"> = {};
+  try {
+    nativeFields = parseRunnerPolicy(frontmatterValues, source.origin);
+  } catch (error) {
+    diagnostics.push({ path: source.path, message: error instanceof Error ? error.message : "Invalid native policy" });
+  }
   if (diagnostics.length > 0) return { ok: false, diagnostics };
 
   const body = source.content.slice(match[0].length).trim();
-  const metadata = Object.fromEntries(Object.entries(frontmatterValues).filter(([key]) => !normalizedKeys.has(key)));
+  const metadata = Object.fromEntries(Object.entries(frontmatterValues).filter(([key]) => !normalizedKeys.has(key) && !nativeKeys.has(key)));
   const definition: NormalizedAgentDefinition = {
     name: name!,
+    ...nativeFields,
     ...(description === undefined ? {} : { description }),
     ...(model === undefined ? {} : { model }),
     ...(thinking === undefined ? {} : { thinking }),
@@ -149,4 +180,133 @@ export function parseAgentDefinition(
     metadata,
   };
   return { ok: true, definition, diagnostics };
+}
+
+const nativeKeys = new Set(["runner", "runner-version", "workspace-trust", "native-allow", "native-deny", "native-tools", "permission-mode", "mcp"]);
+
+function canonicalAbsolute(value: string): boolean {
+  return value.startsWith("/") && !value.includes("\\") && !value.includes("\0") &&
+    !value.split("/").slice(1).some((part) => part === "." || part === ".." || part === "");
+}
+
+export function validateDefinitionOrigin(origin: DefinitionOrigin | undefined): void {
+  if (!origin || !["global-user", "installed-package", "project"].includes(origin.kind) ||
+      !canonicalAbsolute(origin.canonicalPath) || !canonicalAbsolute(origin.canonicalRoot) ||
+      !origin.canonicalPath.startsWith(`${origin.canonicalRoot}/`)) {
+    throw new TypeError("Definition requires host-verified canonical origin containment");
+  }
+}
+
+export function requireTrustedNativeOrigin(origin: DefinitionOrigin | undefined): void {
+  validateDefinitionOrigin(origin);
+  if (origin!.kind === "project") throw new TypeError("Project definitions cannot enable native policy");
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function strings(value: unknown, field: string): readonly string[] {
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string" && item.trim() && !item.includes("\0"))) {
+    throw new TypeError(`${field} must be an array of nonblank strings`);
+  }
+  return value;
+}
+
+function parseRunnerPolicy(values: Record<string, unknown>, origin?: DefinitionOrigin): Pick<NormalizedAgentDefinition, "runner" | "origin" | "native"> {
+  if (origin !== undefined) validateDefinitionOrigin(origin);
+  const runner = values.runner;
+  if (runner !== undefined && runner !== "pi" && runner !== "copilot" && runner !== "claude") throw new TypeError(`Unknown runner '${String(runner)}'`);
+  const privileged = [...nativeKeys].some((key) => key !== "runner" && Object.hasOwn(values, key));
+  if (privileged && runner !== "copilot" && runner !== "claude") throw new TypeError("Native policy requires runner: copilot or claude");
+  if (runner !== "copilot" && runner !== "claude") return { ...(runner === undefined ? {} : { runner }), ...(origin === undefined ? {} : { origin: structuredClone(origin) }) };
+  requireTrustedNativeOrigin(origin);
+  if (values["auto-exit"] !== true || values.interactive !== false ||
+      (values["session-mode"] !== undefined && values["session-mode"] !== "new")) {
+    throw new TypeError(`${runner} requires auto-exit: true, interactive: false and no fork/retained session mode`);
+  }
+  for (const field of ["tools", "deny-tools", "provider", "cli", "command", "args", "argv"]) {
+    if (Object.hasOwn(values, field)) throw new TypeError(`${runner} does not support '${field}' overrides`);
+  }
+  if (typeof values["runner-version"] !== "string" || !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(values["runner-version"])) {
+    throw new TypeError(`${runner} requires a pinned runner-version`);
+  }
+  const workspaceTrust = values["workspace-trust"];
+  if (workspaceTrust !== "existing" && workspaceTrust !== "session") throw new TypeError("Invalid workspace-trust");
+  let claudePolicy: Pick<NativeAgentPolicy, "nativeTools" | "permissionMode"> = {};
+  if (runner === "claude") {
+    if (workspaceTrust !== "existing") throw new TypeError("Claude requires existing workspace trust verified by the host before noninteractive launch");
+    const nativeTools = strings(values["native-tools"], "native-tools");
+    if (nativeTools.some((tool) => !/^[A-Za-z][A-Za-z0-9]*$/.test(tool))) throw new TypeError("native-tools must contain explicit built-in tool names");
+    const permissionMode = values["permission-mode"];
+    if (permissionMode !== "manual" && permissionMode !== "dontAsk" && permissionMode !== "plan") throw new TypeError("Claude requires permission-mode: manual, dontAsk or plan");
+    claudePolicy = { nativeTools, permissionMode };
+  } else if (Object.hasOwn(values, "native-tools") || Object.hasOwn(values, "permission-mode")) {
+    throw new TypeError("Claude policy fields require runner: claude");
+  }
+  const allow = strings(values["native-allow"], "native-allow");
+  const deny = strings(values["native-deny"] ?? [], "native-deny");
+  if (!record(values.mcp ?? {})) throw new TypeError("mcp must be a mapping");
+  const mcp: Record<string, NativeMcpServer> = {};
+  for (const [name, server] of Object.entries(values.mcp ?? {})) {
+    if (!/^[\w-]+$/.test(name) || !record(server) || typeof server.command !== "string" || !server.command.trim() ||
+        Object.keys(server).some((key) => !["command", "args", "env"].includes(key))) throw new TypeError(`Invalid MCP server '${name}'`);
+    const args = strings(server.args ?? [], `mcp.${name}.args`);
+    if (server.env !== undefined && (!record(server.env) || !Object.values(server.env).every((value) => typeof value === "string"))) throw new TypeError("MCP env must contain literal strings");
+    for (const value of [server.command, ...args, ...Object.values(server.env ?? {})]) validateNativeTemplate(value as string);
+    Object.defineProperty(mcp, name, { value: { command: server.command, args, ...(server.env === undefined ? {} : { env: server.env }) }, enumerable: true });
+  }
+  return { runner, origin: structuredClone(origin!), native: structuredClone({ runnerVersion: values["runner-version"], workspaceTrust, allow, deny, mcp, ...claudePolicy }) as NativeAgentPolicy };
+}
+
+const substitutions = new Set(["home", "node", "parentCwd", "managedSessionId", "env.PI_TODO_PATH"]);
+function validateNativeTemplate(value: string): void {
+  if (value.includes("\0")) throw new TypeError("Native template contains NUL");
+  const rest = value.replace(/\{([^{}]+)\}/g, (_match, key: string) => {
+    if (!substitutions.has(key)) throw new TypeError(`Unknown native placeholder '${key}'`);
+    return "";
+  });
+  if (/[{}]/.test(rest)) throw new TypeError("Malformed native placeholder");
+}
+
+// Candidates are ordered low to high precedence by the host. Selection never
+// combines policy from one source with content from another.
+export function selectAgentDefinition(candidates: readonly NormalizedAgentDefinition[]): NormalizedAgentDefinition {
+  if (!candidates.length) throw new TypeError("No agent definition candidates");
+  if (new Set(candidates.map((candidate) => candidate.name)).size !== 1) throw new TypeError("Definition candidates must have the same name");
+  for (const candidate of candidates) {
+    if (candidate.origin) validateDefinitionOrigin(candidate.origin);
+    if (candidate.runner === "copilot" || candidate.runner === "claude" || candidate.native) requireTrustedNativeOrigin(candidate.origin);
+  }
+  if (candidates.some((candidate) => candidate.runner === "copilot" || candidate.runner === "claude") && candidates.some((candidate) => candidate.origin?.kind === "project" || !candidate.origin)) {
+    throw new TypeError("Project or unprovenanced shadow of a trusted native role is forbidden");
+  }
+  return candidates[candidates.length - 1];
+}
+
+export type NativeRuntimeContext = Readonly<{ home: string; node: string }>;
+export type NativeScopeBindings = Readonly<{
+  parentCwd: string;
+  managedSessionId: string;
+  todoPathLiteral: string;
+}>;
+export type NativeBindingContext = NativeRuntimeContext & NativeScopeBindings;
+
+export function bindNativeMcp(policy: NativeAgentPolicy, context: NativeBindingContext): Readonly<Record<string, NativeMcpServer>> {
+  for (const key of ["home", "node", "parentCwd", "managedSessionId", "todoPathLiteral"] as const) {
+    const value = context[key];
+    if (typeof value !== "string" || value.includes("\0") || (key !== "todoPathLiteral" && !value.trim())) {
+      throw new TypeError(`Invalid native binding '${key}'`);
+    }
+  }
+  const values: Record<string, string> = { home: context.home, node: context.node, parentCwd: context.parentCwd, managedSessionId: context.managedSessionId, "env.PI_TODO_PATH": context.todoPathLiteral };
+  const expand = (value: string): string => {
+    validateNativeTemplate(value);
+    return value.replace(/\{([^{}]+)\}/g, (_match, key: string) => {
+      const literal = values[key];
+      if (typeof literal !== "string" || literal.includes("\0")) throw new TypeError(`Missing literal context '${key}'`);
+      return literal;
+    });
+  };
+  return Object.fromEntries(Object.entries(policy.mcp).map(([name, server]) => [name, { command: expand(server.command), args: server.args.map(expand), ...(server.env === undefined ? {} : { env: Object.fromEntries(Object.entries(server.env).map(([key, value]) => [key, expand(value)])) }) }]));
 }

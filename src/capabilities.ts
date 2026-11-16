@@ -1,10 +1,12 @@
 export type AgentRunCapabilities = Readonly<{
   session: "ephemeral" | "persistent";
-  progress: "pi-json-events" | "activity-snapshot";
+  process?: "ephemeral" | "retained";
+  completion?: "pi-handshake" | "natural-exit-output";
+  progress: "pi-json-events" | "activity-snapshot" | "captured-output";
   interrupt: "process-abort" | "turn-escape";
   termination: "process-signal" | "herdr-pane-close" | "core-terminal-kill";
   timeout: "process-deadline" | "unsupported";
-  resume: "unsupported" | "pi-session-file";
+  resume: "unsupported" | "pi-session-file" | "managed-native-name" | "managed-native-uuid";
   fork: "unsupported" | "seeded-pi-session";
   interaction: "none" | "user-takeover";
 }>;
@@ -34,6 +36,24 @@ export const visibleHerdrCapabilities = {
 export const visibleHerdrCoreCapabilities = {
   ...visibleHerdrCapabilities,
   termination: "core-terminal-kill",
+} as const satisfies AgentRunCapabilities;
+
+export const copilotJobCapabilities = {
+  session: "persistent",
+  process: "ephemeral",
+  completion: "natural-exit-output",
+  progress: "captured-output",
+  interrupt: "process-abort",
+  termination: "core-terminal-kill",
+  timeout: "unsupported",
+  resume: "managed-native-name",
+  fork: "unsupported",
+  interaction: "none",
+} as const satisfies AgentRunCapabilities;
+
+export const claudeJobCapabilities = {
+  ...copilotJobCapabilities,
+  resume: "managed-native-uuid",
 } as const satisfies AgentRunCapabilities;
 
 export class UnsupportedAgentRunCapability extends Error {

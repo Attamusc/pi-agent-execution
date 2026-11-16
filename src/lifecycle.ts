@@ -34,10 +34,16 @@ export type AgentRunEvidence =
   | Evidence<"timeout-fired", { timeoutMs: number }>
   | Evidence<"interrupt-requested", { mode: InterruptMode }>
   | Evidence<"terminate-requested", { mode: TerminationMode }>
-  | Evidence<"transport-failed", { message: string }>;
+  | Evidence<"transport-failed", { message: string }>
+  | Evidence<"request-timeout", { operation: string; timeoutMs: number }>
+  | Evidence<"job-output-captured", { output: string }>;
+
+export type AgentRequestTimeout = Readonly<{ operation: string; timeoutMs: number }>;
 
 export type AgentRunState = Readonly<{
   runId: string;
+  completionMode: "pi-handshake" | "native-job";
+  jobOutput: string | null;
   execution: Readonly<{
     status: "idle" | "launching" | "active" | "settling" | "settled";
   }>;
@@ -58,6 +64,7 @@ export type AgentRunState = Readonly<{
     | Readonly<{ status: "terminate-requested"; mode: TerminationMode }>
     | Readonly<{ status: "timed-out"; timeoutMs: number }>;
   transportFailure: Readonly<{ message: string }> | null;
+  requestTimeout: AgentRequestTimeout | null;
   lastSequenceBySource: Readonly<Record<string, number>>;
 }>;
 
@@ -70,7 +77,8 @@ export type AgentRunDisposition =
   | "interrupted"
   | "terminated"
   | "agent-error"
-  | "transport-failed";
+  | "transport-failed"
+  | "request-timeout";
 
 export type AgentRunUsage = Readonly<{
   inputTokens?: number;
@@ -87,6 +95,8 @@ export type AgentRunCompletion = Readonly<{
   output: string;
   taskOutcome: "unknown";
   settled: boolean;
+  requestTimeout?: AgentRequestTimeout;
+  completionEvidence?: "native-job-exit-output";
   processExit?: AgentProcessExit;
   sessionRef?: string;
   errorMessage?: string;
@@ -119,10 +129,13 @@ export type AgentRunProjectedStatus = Readonly<{
   taskOutcome: "unknown";
 }>;
 
-export function createAgentRunState(runId: string): AgentRunState {
+export function createAgentRunState(runId: string, completionMode: "pi-handshake" | "native-job" = "pi-handshake"): AgentRunState {
+  if (completionMode !== "pi-handshake" && completionMode !== "native-job") throw new TypeError("Unknown completion mode");
   if (!runId.trim()) throw new TypeError("runId must not be blank");
   return deepFreeze({
     runId,
+    completionMode,
+    jobOutput: null,
     execution: { status: "idle" },
     completionIntent: null,
     session: { status: "unknown" },
@@ -130,6 +143,7 @@ export function createAgentRunState(runId: string): AgentRunState {
     startFailure: null,
     control: { status: "none" },
     transportFailure: null,
+    requestTimeout: null,
     lastSequenceBySource: {},
   });
 }
@@ -150,6 +164,8 @@ export function reduceAgentRunEvidence(
   let startFailure = state.startFailure;
   let control = state.control;
   let transportFailure = state.transportFailure;
+  let jobOutput = state.jobOutput;
+  let requestTimeout = state.requestTimeout;
 
   switch (evidence.kind) {
     case "launch-requested":
@@ -182,7 +198,7 @@ export function reduceAgentRunEvidence(
       execution = { status: evidence.willRetry ? "active" : "settling" };
       break;
     case "agent-settled":
-      execution = { status: "settled" };
+      if (state.completionMode === "pi-handshake") execution = { status: "settled" };
       break;
     case "completion-requested":
       if (completionIntent?.reason !== "agent-error") {
@@ -219,6 +235,12 @@ export function reduceAgentRunEvidence(
     case "transport-failed":
       transportFailure = { message: evidence.message };
       break;
+    case "request-timeout":
+      requestTimeout = { operation: evidence.operation, timeoutMs: evidence.timeoutMs };
+      break;
+    case "job-output-captured":
+      if (state.completionMode === "native-job" && typeof evidence.output === "string" && jobOutput === null) jobOutput = evidence.output;
+      break;
   }
 
   return deepFreeze({
@@ -230,6 +252,8 @@ export function reduceAgentRunEvidence(
     startFailure,
     control,
     transportFailure,
+    jobOutput,
+    requestTimeout,
     lastSequenceBySource: {
       ...state.lastSequenceBySource,
       [evidence.sourceId]: evidence.sequence,
@@ -270,11 +294,16 @@ export function projectAgentRunStatus(state: AgentRunState): AgentRunProjectedSt
     const normalExit = state.process.exit?.kind === "native"
       ? state.process.exit.code === 0 && state.process.exit.signal === null
       : state.process.exit?.kind === "shell" && state.process.exit.shellStatus === 0;
-    const gracefulHandshake = state.completionIntent !== null && state.execution.status === "settled";
+    const gracefulHandshake = state.completionMode === "native-job"
+      ? state.jobOutput !== null
+      : state.completionIntent !== null && state.execution.status === "settled";
     if (!normalExit || !gracefulHandshake) {
       return { status: "abnormal", disposition: "abnormal-exit", terminal: true, taskOutcome: "unknown" };
     }
     return { status: "completed", disposition: "completed", terminal: true, taskOutcome: "unknown" };
+  }
+  if (state.requestTimeout) {
+    return { status: "failed", disposition: "request-timeout", terminal: false, taskOutcome: "unknown" };
   }
   if (state.control.status === "interrupted") {
     return { status: "interrupted", disposition: "interrupted", terminal: false, taskOutcome: "unknown" };
@@ -338,9 +367,11 @@ export function projectAgentRunCompletion(
   return deepFreeze({
     runId: state.runId,
     execution,
-    output: input.output,
+    output: state.completionMode === "native-job" ? state.jobOutput ?? "" : input.output,
+    ...(projected.disposition === "completed" && state.completionMode === "native-job" ? { completionEvidence: "native-job-exit-output" as const } : {}),
     taskOutcome: "unknown",
     settled: state.execution.status === "settled",
+    ...(state.requestTimeout === null ? {} : { requestTimeout: state.requestTimeout }),
     ...(state.process.status === "exited" && state.process.exit !== undefined
       ? { processExit: structuredClone(state.process.exit) }
       : {}),
